@@ -1,4 +1,5 @@
 """Word ドキュメントリーダー"""
+from __future__ import annotations
 from pathlib import Path
 from docx import Document
 

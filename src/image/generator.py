@@ -1,4 +1,5 @@
 """画像生成モジュール - Google Gemini/Imagen対応"""
+from __future__ import annotations
 import base64
 from pathlib import Path
 from datetime import datetime

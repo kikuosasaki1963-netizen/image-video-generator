@@ -1,4 +1,5 @@
 """プロンプトパーサー - ドキュメントから画像生成プロンプトを抽出"""
+from __future__ import annotations
 import re
 from dataclasses import dataclass
 from google import genai
