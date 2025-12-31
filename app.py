@@ -1,4 +1,5 @@
 """画像生成エージェント - Streamlit UI"""
+from __future__ import annotations
 import streamlit as st
 from pathlib import Path
 import os
