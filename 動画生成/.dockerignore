@@ -1,0 +1,49 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# テスト
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ドキュメント
+docs/
+*.md
+!requirements.txt
+
+# 一時ファイル
+temp/
+*.tmp
+*.log
+
+# 機密情報
+.env
+.env.*
+credentials.json
+*.pem
+*.key
+
+# 出力（ビルド時は空）
+output/
+
+# その他
+.DS_Store
+Thumbs.db

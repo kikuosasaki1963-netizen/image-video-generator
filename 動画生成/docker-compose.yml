@@ -1,0 +1,56 @@
+# 動画生成エージェント - Docker Compose設定
+version: "3.8"
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: video-generator
+    ports:
+      - "8502:8502"
+    volumes:
+      # 出力ディレクトリをホストにマウント
+      - ./output:/app/output
+      # 設定ファイルをマウント
+      - ./config:/app/config
+      # Google Cloud認証情報（ローカルファイルの場合）
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-./credentials.json}:/app/credentials.json:ro
+    environment:
+      # Google Cloud
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials.json
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      # Beatoven.ai
+      - BEATOVEN_API_KEY=${BEATOVEN_API_KEY}
+      # 動画素材API
+      - PEXELS_API_KEY=${PEXELS_API_KEY}
+      - PIXABAY_API_KEY=${PIXABAY_API_KEY}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8502/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # 開発用: ホットリロード有効
+  app-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: video-generator-dev
+    ports:
+      - "8502:8502"
+    volumes:
+      # ソースコードをマウント（ホットリロード）
+      - .:/app
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-./credentials.json}:/app/credentials.json:ro
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials.json
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - BEATOVEN_API_KEY=${BEATOVEN_API_KEY}
+      - PEXELS_API_KEY=${PEXELS_API_KEY}
+      - PIXABAY_API_KEY=${PIXABAY_API_KEY}
+    command: streamlit run app.py --server.port=8502 --server.address=0.0.0.0 --server.runOnSave=true
+    profiles:
+      - dev

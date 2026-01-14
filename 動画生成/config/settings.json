@@ -1,0 +1,55 @@
+{
+    "speakers": {
+        "speaker1": {
+            "display_name": "ナレーター1",
+            "voice_name": "ja-JP-Neural2-B",
+            "language_code": "ja-JP",
+            "avatar_path": null
+        },
+        "speaker2": {
+            "display_name": "ナレーター2",
+            "voice_name": "ja-JP-Neural2-C",
+            "language_code": "ja-JP",
+            "avatar_path": null
+        }
+    },
+    "defaults": {
+        "output_format": ["youtube"],
+        "bgm": {
+            "mood": "neutral",
+            "genre": "background"
+        },
+        "output_folder": "output"
+    },
+    "video_formats": {
+        "youtube": {
+            "width": 1920,
+            "height": 1080,
+            "aspect_ratio": "16:9"
+        },
+        "instagram_reel": {
+            "width": 1080,
+            "height": 1920,
+            "aspect_ratio": "9:16"
+        },
+        "instagram_feed": {
+            "width": 1080,
+            "height": 1080,
+            "aspect_ratio": "1:1"
+        },
+        "tiktok": {
+            "width": 1080,
+            "height": 1920,
+            "aspect_ratio": "9:16"
+        }
+    },
+    "image_generation": {
+        "model": "gemini-3-pro-image-preview",
+        "default_resolution": "1024x1024"
+    },
+    "stock_video": {
+        "orientation": "landscape",
+        "size": "medium",
+        "per_page": 5
+    }
+}
