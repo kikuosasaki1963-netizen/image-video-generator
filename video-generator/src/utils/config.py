@@ -78,11 +78,20 @@ def get_env_var(key: str, default: str | None = None) -> str | None:
 def get_gcp_credentials() -> dict | str | None:
     """Google Cloud認証情報を取得
 
-    Streamlit CloudではJSONオブジェクト、ローカルではファイルパス
+    Render.com/Streamlit CloudではJSONオブジェクト、ローカルではファイルパス
 
     Returns:
         認証情報（dict または ファイルパス）
     """
+    # Render.com の環境変数から取得（JSON文字列）
+    load_dotenv()
+    gcp_json = os.getenv("GCP_SERVICE_ACCOUNT_JSON")
+    if gcp_json:
+        try:
+            return json.loads(gcp_json)
+        except json.JSONDecodeError:
+            pass
+
     # Streamlit Cloud の secrets から取得
     try:
         import streamlit as st
@@ -93,5 +102,4 @@ def get_gcp_credentials() -> dict | str | None:
         pass
 
     # ローカル環境変数からファイルパスを取得
-    load_dotenv()
     return os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
