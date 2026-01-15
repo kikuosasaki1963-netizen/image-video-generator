@@ -84,11 +84,17 @@ def get_gcp_credentials() -> dict | str | None:
         認証情報（dict または ファイルパス）
     """
     # Render.com の環境変数から取得（JSON文字列）
-    load_dotenv()
-    gcp_json = os.getenv("GCP_SERVICE_ACCOUNT_JSON")
+    gcp_json = os.environ.get("GCP_SERVICE_ACCOUNT_JSON")
     if gcp_json:
         try:
+            # そのままパース
             return json.loads(gcp_json)
+        except json.JSONDecodeError:
+            pass
+        try:
+            # エスケープされた改行を処理
+            cleaned = gcp_json.replace("\\n", "\n")
+            return json.loads(cleaned)
         except json.JSONDecodeError:
             pass
 
@@ -102,4 +108,5 @@ def get_gcp_credentials() -> dict | str | None:
         pass
 
     # ローカル環境変数からファイルパスを取得
+    load_dotenv()
     return os.getenv("GOOGLE_APPLICATION_CREDENTIALS")

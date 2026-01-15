@@ -15,7 +15,7 @@ from src.audio.tts import TTSClient
 from src.bgm.beatoven import BeatovenClient
 from src.image.generator import ImageGenerator
 from src.parser.script import ScriptParser
-from src.utils.config import get_env_var, load_settings, save_settings
+from src.utils.config import get_env_var, get_gcp_credentials, load_settings, save_settings
 from src.video.editor import Timeline, TimelineEntry, VideoEditor
 from src.video.stock import StockVideoClient
 
@@ -135,7 +135,7 @@ def main_page() -> None:
         st.header("STEP 3: 音声プレビュー＆確認")
 
         # APIキー確認
-        has_google_creds = bool(get_env_var("GOOGLE_APPLICATION_CREDENTIALS"))
+        has_google_creds = bool(get_gcp_credentials())
 
         if not has_google_creds:
             st.warning("⚠️ Google Cloud TTSのAPIキーが必要です。設定ページで設定してください。")
@@ -215,7 +215,7 @@ def main_page() -> None:
 
         # API設定状況確認
         api_status = {
-            "Google Cloud TTS": bool(get_env_var("GOOGLE_APPLICATION_CREDENTIALS")),
+            "Google Cloud TTS": bool(get_gcp_credentials()),
             "Gemini API": bool(get_env_var("GOOGLE_API_KEY")),
             "Beatoven.ai": bool(get_env_var("BEATOVEN_API_KEY")),
             "Pexels": bool(get_env_var("PEXELS_API_KEY")),
@@ -479,7 +479,7 @@ def settings_page() -> None:
         st.subheader("現在の設定状況")
 
         api_status = {
-            "GOOGLE_APPLICATION_CREDENTIALS": "✅ 設定済み" if get_env_var("GOOGLE_APPLICATION_CREDENTIALS") else "❌ 未設定",
+            "GCP認証情報 (TTS)": "✅ 設定済み" if get_gcp_credentials() else "❌ 未設定",
             "GOOGLE_API_KEY": "✅ 設定済み" if get_env_var("GOOGLE_API_KEY") else "❌ 未設定",
             "BEATOVEN_API_KEY": "✅ 設定済み" if get_env_var("BEATOVEN_API_KEY") else "❌ 未設定",
             "PEXELS_API_KEY": "✅ 設定済み" if get_env_var("PEXELS_API_KEY") else "❌ 未設定",
