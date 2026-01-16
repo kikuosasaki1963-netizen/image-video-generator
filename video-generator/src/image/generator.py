@@ -175,16 +175,19 @@ class ImageGenerator:
         try:
             client = self._get_client()
             image_settings = self._settings.get("image_generation", {})
-            model = image_settings.get("model", "gemini-3-pro-image-preview")
+            model = image_settings.get("model", "gemini-2.5-flash-preview-05-20")
 
-            logger.debug("画像生成開始: prompt_length=%d", len(prompt))
+            logger.info("画像生成開始: model=%s, prompt_length=%d", model, len(prompt))
+
+            # Gemini 2.5 Flash で画像生成
+            from google.genai import types
 
             response = client.models.generate_content(
                 model=model,
-                contents=prompt,
-                config={
-                    "response_modalities": ["IMAGE"],
-                },
+                contents=[prompt],
+                config=types.GenerateContentConfig(
+                    response_modalities=["TEXT", "IMAGE"],
+                ),
             )
 
             output_path = Path(output_path)
@@ -192,12 +195,25 @@ class ImageGenerator:
 
             # レスポンスから画像データを取得
             for part in response.candidates[0].content.parts:
-                if part.inline_data:
-                    image_data = base64.b64decode(part.inline_data.data)
-                    with open(output_path, "wb") as f:
-                        f.write(image_data)
-                    logger.info("画像生成完了: %s", output_path)
-                    return output_path
+                if hasattr(part, 'inline_data') and part.inline_data is not None:
+                    # 新しいAPI: as_image() メソッドを使用
+                    if hasattr(part, 'as_image'):
+                        image = part.as_image()
+                        image.save(str(output_path))
+                        logger.info("画像生成完了 (as_image): %s", output_path)
+                        return output_path
+                    else:
+                        # 従来のAPI: base64デコード
+                        image_data = base64.b64decode(part.inline_data.data)
+                        with open(output_path, "wb") as f:
+                            f.write(image_data)
+                        logger.info("画像生成完了 (base64): %s", output_path)
+                        return output_path
+
+            # テキストレスポンスのみの場合はログ出力
+            for part in response.candidates[0].content.parts:
+                if hasattr(part, 'text') and part.text:
+                    logger.warning("テキストレスポンス受信: %s", part.text[:200])
 
             raise ImageGenerationError("レスポンスに画像データが含まれていません")
 
