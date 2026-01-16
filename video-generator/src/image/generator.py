@@ -175,18 +175,20 @@ class ImageGenerator:
         try:
             client = self._get_client()
             image_settings = self._settings.get("image_generation", {})
-            model = image_settings.get("model", "gemini-2.0-flash-preview-image-generation")
+            model = image_settings.get("model", "gemini-3-pro-image-preview")
 
             logger.info("画像生成開始: model=%s, prompt_length=%d", model, len(prompt))
 
-            # Gemini 2.5 Flash で画像生成
+            # Gemini 3 Pro Image で画像生成
             from google.genai import types
 
             response = client.models.generate_content(
                 model=model,
-                contents=[prompt],
+                contents=prompt,
                 config=types.GenerateContentConfig(
-                    response_modalities=["TEXT", "IMAGE"],
+                    image_config=types.ImageConfig(
+                        aspect_ratio="16:9",
+                    )
                 ),
             )
 
@@ -194,24 +196,16 @@ class ImageGenerator:
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
             # レスポンスから画像データを取得
-            for part in response.candidates[0].content.parts:
-                if hasattr(part, 'inline_data') and part.inline_data is not None:
-                    # 新しいAPI: as_image() メソッドを使用
-                    if hasattr(part, 'as_image'):
-                        image = part.as_image()
-                        image.save(str(output_path))
-                        logger.info("画像生成完了 (as_image): %s", output_path)
-                        return output_path
-                    else:
-                        # 従来のAPI: base64デコード
-                        image_data = base64.b64decode(part.inline_data.data)
-                        with open(output_path, "wb") as f:
-                            f.write(image_data)
-                        logger.info("画像生成完了 (base64): %s", output_path)
-                        return output_path
+            image_parts = [part for part in response.parts if hasattr(part, 'inline_data') and part.inline_data]
+
+            if image_parts:
+                image = image_parts[0].as_image()
+                image.save(str(output_path))
+                logger.info("画像生成完了: %s", output_path)
+                return output_path
 
             # テキストレスポンスのみの場合はログ出力
-            for part in response.candidates[0].content.parts:
+            for part in response.parts:
                 if hasattr(part, 'text') and part.text:
                     logger.warning("テキストレスポンス受信: %s", part.text[:200])
 
