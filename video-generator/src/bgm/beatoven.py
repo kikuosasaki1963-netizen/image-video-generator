@@ -25,25 +25,9 @@ class BeatovenClient:
 
     def _get_client(self):
         """クライアントを遅延初期化"""
-        if self._client is None:
-            api_key = get_env_var("BEATOVEN_API_KEY")
-            if not api_key:
-                raise ConfigurationError(
-                    "BEATOVEN_API_KEY が設定されていません。"
-                    ".envファイルまたは環境変数を確認してください。"
-                )
-
-            try:
-                import beatoven
-
-                self._client = beatoven.Client(api_key=api_key)
-                logger.info("Beatoven.ai クライアントを初期化しました")
-            except Exception as e:
-                raise BGMGenerationError(
-                    f"Beatoven.ai クライアントの初期化に失敗: {e}",
-                    original_error=e,
-                )
-        return self._client
+        # 注意: Beatoven.ai公式SDKは存在しないため、この機能は一時的に無効化
+        logger.warning("Beatoven.ai SDKは現在利用できません。BGM生成はスキップされます。")
+        return None
 
     def generate(
         self,
@@ -76,10 +60,16 @@ class BeatovenClient:
         output_path: str | Path,
         mood: str | None = None,
         genre: str | None = None,
-    ) -> Path:
+    ) -> Path | None:
         """リトライ付きBGM生成（内部メソッド）"""
         try:
             client = self._get_client()
+
+            # クライアントが利用できない場合はスキップ
+            if client is None:
+                logger.warning("BGM生成をスキップしました（Beatoven.ai SDKが利用できません）")
+                return None
+
             defaults = self._settings.get("defaults", {}).get("bgm", {})
 
             if mood is None:
