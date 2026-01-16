@@ -34,3 +34,4 @@ temp/
 
 # Logs
 *.log
+streamlit_secrets.toml
