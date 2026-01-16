@@ -1,12 +1,13 @@
-"""Google Cloud Text-to-Speech クライアント"""
+"""Gemini 2.5 Pro Preview TTS クライアント"""
 
 from __future__ import annotations
 
 import logging
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 
-from src.utils.config import get_env_var, get_gcp_credentials, load_settings
+from src.utils.config import get_env_var, load_settings
 from src.utils.exceptions import ConfigurationError, TTSError
 from src.utils.retry import with_retry
 
@@ -15,6 +16,12 @@ logger = logging.getLogger(__name__)
 # リトライ設定
 MAX_RETRIES = 3
 BASE_DELAY = 1.0
+
+# Gemini TTS 日本語対応ボイス
+GEMINI_VOICES = {
+    "speaker1": "Aoede",   # 女性風
+    "speaker2": "Puck",    # 男性風
+}
 
 
 @dataclass
@@ -26,7 +33,7 @@ class VoiceConfig:
 
 
 class TTSClient:
-    """Google Cloud TTS クライアント"""
+    """Gemini 2.5 Pro Preview TTS クライアント"""
 
     def __init__(self) -> None:
         self._client = None
@@ -35,30 +42,21 @@ class TTSClient:
     def _get_client(self):
         """クライアントを遅延初期化"""
         if self._client is None:
-            credentials = get_gcp_credentials()
-            if not credentials:
+            api_key = get_env_var("GOOGLE_API_KEY")
+            if not api_key:
                 raise ConfigurationError(
-                    "Google Cloud認証情報が設定されていません。"
-                    "Streamlit Cloudの場合はSecretsに gcp_service_account を設定してください。"
-                    "ローカルの場合は GOOGLE_APPLICATION_CREDENTIALS を設定してください。"
+                    "GOOGLE_API_KEY が設定されていません。"
+                    ".envファイルまたは環境変数を確認してください。"
                 )
 
             try:
-                from google.cloud import texttospeech
+                import google.genai as genai
 
-                # Streamlit Cloud（dict）またはローカル（ファイルパス）に対応
-                if isinstance(credentials, dict):
-                    from google.oauth2 import service_account
-
-                    creds = service_account.Credentials.from_service_account_info(credentials)
-                    self._client = texttospeech.TextToSpeechClient(credentials=creds)
-                else:
-                    self._client = texttospeech.TextToSpeechClient()
-
-                logger.info("Google Cloud TTS クライアントを初期化しました")
+                self._client = genai.Client(api_key=api_key)
+                logger.info("Gemini TTS クライアントを初期化しました")
             except Exception as e:
                 raise TTSError(
-                    f"Google Cloud TTS クライアントの初期化に失敗: {e}",
+                    f"Gemini TTS クライアントの初期化に失敗: {e}",
                     original_error=e,
                 )
         return self._client
@@ -75,8 +73,11 @@ class TTSClient:
         speakers = self._settings.get("speakers", {})
         speaker_config = speakers.get(speaker, {})
 
+        # Gemini TTS用のボイス名を取得（設定ファイルまたはデフォルト）
+        voice_name = speaker_config.get("gemini_voice", GEMINI_VOICES.get(speaker, "Kore"))
+
         return VoiceConfig(
-            voice_name=speaker_config.get("voice_name", "ja-JP-Neural2-B"),
+            voice_name=voice_name,
             language_code=speaker_config.get("language_code", "ja-JP"),
         )
 
@@ -111,36 +112,45 @@ class TTSClient:
     ) -> Path:
         """リトライ付き音声合成（内部メソッド）"""
         try:
-            from google.cloud import texttospeech
+            from google.genai import types
 
             client = self._get_client()
             voice_config = self.get_voice_config(speaker)
 
-            logger.debug("音声合成開始: speaker=%s, text_length=%d", speaker, len(text))
+            logger.info("Gemini TTS 音声合成開始: speaker=%s, voice=%s, text_length=%d",
+                       speaker, voice_config.voice_name, len(text))
 
-            synthesis_input = texttospeech.SynthesisInput(text=text)
-            voice = texttospeech.VoiceSelectionParams(
-                language_code=voice_config.language_code,
-                name=voice_config.voice_name,
-            )
-            audio_config = texttospeech.AudioConfig(
-                audio_encoding=texttospeech.AudioEncoding.MP3
-            )
-
-            response = client.synthesize_speech(
-                input=synthesis_input,
-                voice=voice,
-                audio_config=audio_config,
+            # Gemini 2.5 Pro Preview TTS で音声生成
+            response = client.models.generate_content(
+                model="gemini-2.5-pro-preview-tts",
+                contents=text,
+                config=types.GenerateContentConfig(
+                    response_modalities=["AUDIO"],
+                    speech_config=types.SpeechConfig(
+                        voice_config=types.VoiceConfig(
+                            prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                voice_name=voice_config.voice_name,
+                            )
+                        ),
+                    ),
+                ),
             )
 
             output_path = Path(output_path)
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
-            with open(output_path, "wb") as f:
-                f.write(response.audio_content)
+            # WAVファイルとして保存
+            audio_data = response.candidates[0].content.parts[0].inline_data.data
+            wav_path = output_path.with_suffix(".wav")
 
-            logger.info("音声合成完了: %s", output_path)
-            return output_path
+            with wave.open(str(wav_path), "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(24000)
+                wf.writeframes(audio_data)
+
+            logger.info("Gemini TTS 音声合成完了: %s", wav_path)
+            return wav_path
 
         except ConfigurationError:
             raise

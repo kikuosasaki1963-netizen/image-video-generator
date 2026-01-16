@@ -1,10 +1,8 @@
 # Streamlit Framework
 streamlit>=1.30.0
 
-# Google Cloud Services
-google-cloud-texttospeech>=2.16.0
-google-genai>=0.3.0
-google-auth>=2.25.0
+# Google AI Services (Gemini API)
+google-genai>=1.0.0
 
 # BGM Generation
 # beatoven.ai はREST APIを直接使用（公式SDKなし）

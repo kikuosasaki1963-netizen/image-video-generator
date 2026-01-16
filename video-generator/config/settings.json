@@ -1,17 +1,20 @@
 {
     "speakers": {
         "speaker1": {
-            "display_name": "ナレーター1",
-            "voice_name": "ja-JP-Neural2-B",
+            "display_name": "ミオン",
+            "gemini_voice": "Aoede",
             "language_code": "ja-JP",
             "avatar_path": null
         },
         "speaker2": {
-            "display_name": "ナレーター2",
-            "voice_name": "ja-JP-Neural2-C",
+            "display_name": "アリイエ",
+            "gemini_voice": "Puck",
             "language_code": "ja-JP",
             "avatar_path": null
         }
+    },
+    "tts": {
+        "model": "gemini-2.5-pro-preview-tts"
     },
     "defaults": {
         "output_format": ["youtube"],
