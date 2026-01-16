@@ -175,7 +175,7 @@ class ImageGenerator:
         try:
             client = self._get_client()
             image_settings = self._settings.get("image_generation", {})
-            model = image_settings.get("model", "gemini-2.5-flash-preview-05-20")
+            model = image_settings.get("model", "gemini-2.0-flash-preview-image-generation")
 
             logger.info("画像生成開始: model=%s, prompt_length=%d", model, len(prompt))
 
