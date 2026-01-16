@@ -1,4 +1,4 @@
-"""Gemini 2.5 Pro Preview TTS クライアント"""
+"""Gemini 2.5 Pro Preview TTS クライアント（マルチスピーカー対応）"""
 
 from __future__ import annotations
 
@@ -6,6 +6,10 @@ import logging
 import wave
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.parser.script import Script
 
 from src.utils.config import get_env_var, load_settings
 from src.utils.exceptions import ConfigurationError, TTSError
@@ -21,6 +25,12 @@ BASE_DELAY = 1.0
 GEMINI_VOICES = {
     "speaker1": "Aoede",   # 女性風
     "speaker2": "Puck",    # 男性風
+}
+
+# スピーカー表示名（プロンプト用）
+SPEAKER_NAMES = {
+    "speaker1": "ミオン",
+    "speaker2": "アリイエ",
 }
 
 
@@ -156,5 +166,107 @@ class TTSClient:
             raise
         except Exception as e:
             error_msg = f"音声合成に失敗しました（話者: {speaker}）: {e}"
+            logger.error(error_msg)
+            raise TTSError(error_msg, original_error=e)
+
+    def synthesize_script(
+        self,
+        script: Script,
+        output_path: str | Path,
+    ) -> Path:
+        """台本全体を1つの音声ファイルに変換（マルチスピーカー対応）
+
+        Args:
+            script: 台本データ
+            output_path: 出力ファイルパス
+
+        Returns:
+            出力ファイルのパス
+
+        Raises:
+            TTSError: 音声合成に失敗した場合
+            ConfigurationError: APIキーが設定されていない場合
+        """
+        return self._synthesize_script_with_retry(script, output_path)
+
+    @with_retry(max_retries=MAX_RETRIES, base_delay=BASE_DELAY)
+    def _synthesize_script_with_retry(
+        self,
+        script: Script,
+        output_path: str | Path,
+    ) -> Path:
+        """リトライ付き台本一括音声合成（内部メソッド）"""
+        try:
+            from google.genai import types
+
+            client = self._get_client()
+
+            # 台本からプロンプトを構築（話者名: セリフ 形式）
+            speakers = self._settings.get("speakers", {})
+            prompt_lines = []
+            speaker_set = set()
+
+            for line in script.lines:
+                speaker_config = speakers.get(line.speaker, {})
+                speaker_name = speaker_config.get("display_name", SPEAKER_NAMES.get(line.speaker, line.speaker))
+                speaker_set.add(line.speaker)
+                prompt_lines.append(f"{speaker_name}: {line.text}")
+
+            full_prompt = " ".join(prompt_lines)
+            logger.info("Gemini TTS マルチスピーカー音声合成開始: lines=%d, speakers=%s",
+                       len(script.lines), list(speaker_set))
+
+            # マルチスピーカー設定を構築
+            speaker_voice_configs = []
+            for speaker_id in speaker_set:
+                speaker_config = speakers.get(speaker_id, {})
+                speaker_name = speaker_config.get("display_name", SPEAKER_NAMES.get(speaker_id, speaker_id))
+                voice_name = speaker_config.get("gemini_voice", GEMINI_VOICES.get(speaker_id, "Kore"))
+
+                speaker_voice_configs.append(
+                    types.SpeakerVoiceConfig(
+                        speaker=speaker_name,
+                        voice_config=types.VoiceConfig(
+                            prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                voice_name=voice_name,
+                            )
+                        )
+                    )
+                )
+
+            # Gemini 2.5 Pro Preview TTS でマルチスピーカー音声生成
+            response = client.models.generate_content(
+                model="gemini-2.5-pro-preview-tts",
+                contents=full_prompt,
+                config=types.GenerateContentConfig(
+                    response_modalities=["AUDIO"],
+                    speech_config=types.SpeechConfig(
+                        multi_speaker_voice_config=types.MultiSpeakerVoiceConfig(
+                            speaker_voice_configs=speaker_voice_configs
+                        )
+                    ),
+                ),
+            )
+
+            output_path = Path(output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # WAVファイルとして保存
+            audio_data = response.candidates[0].content.parts[0].inline_data.data
+            wav_path = output_path.with_suffix(".wav")
+
+            with wave.open(str(wav_path), "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(24000)
+                wf.writeframes(audio_data)
+
+            logger.info("Gemini TTS マルチスピーカー音声合成完了: %s", wav_path)
+            return wav_path
+
+        except ConfigurationError:
+            raise
+        except Exception as e:
+            error_msg = f"台本の音声合成に失敗しました: {e}"
             logger.error(error_msg)
             raise TTSError(error_msg, original_error=e)

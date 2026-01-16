@@ -163,7 +163,14 @@ def main_page() -> None:
                 except Exception as e:
                     st.error(f"❌ 音声生成エラー: {e}")
 
-            # 全セリフ一括生成
+            # 音声生成モード選択
+            audio_mode = st.radio(
+                "音声生成モード",
+                ["一括生成（1本のファイル・推奨）", "個別生成（セリフごとのファイル）"],
+                horizontal=True,
+                help="一括生成: マルチスピーカーで自然な会話を1つのファイルに。個別生成: 各セリフを別々のファイルに。"
+            )
+
             if st.button("🔊 全セリフの音声を生成", type="primary"):
                 progress = st.progress(0)
                 status = st.empty()
@@ -174,15 +181,27 @@ def main_page() -> None:
                     audio_dir = output_dir / "audio"
                     audio_dir.mkdir(exist_ok=True)
 
-                    for i, line in enumerate(script.lines):
-                        status.text(f"生成中: {i + 1}/{script.total_lines} - {line.speaker}")
-                        output_path = audio_dir / f"{line.number:03d}_{line.speaker}.mp3"
-                        tts.synthesize(line.text, line.speaker, output_path)
-                        st.session_state.audio_files[line.number] = str(output_path)
-                        progress.progress((i + 1) / script.total_lines)
+                    if audio_mode == "一括生成（1本のファイル・推奨）":
+                        # マルチスピーカー一括生成
+                        status.text("🎤 マルチスピーカー音声を一括生成中...")
+                        output_path = audio_dir / "full_audio.wav"
+                        wav_path = tts.synthesize_script(script, output_path)
+                        st.session_state.audio_files["full"] = str(wav_path)
+                        progress.progress(1.0)
+                        st.session_state.output_dir = output_dir
+                        st.success(f"✅ 音声を1本のファイルに生成しました: {wav_path.name}")
+                        st.audio(str(wav_path), format="audio/wav")
+                    else:
+                        # 個別生成（従来方式）
+                        for i, line in enumerate(script.lines):
+                            status.text(f"生成中: {i + 1}/{script.total_lines} - {line.speaker}")
+                            output_path = audio_dir / f"{line.number:03d}_{line.speaker}.wav"
+                            tts.synthesize(line.text, line.speaker, output_path)
+                            st.session_state.audio_files[line.number] = str(output_path)
+                            progress.progress((i + 1) / script.total_lines)
 
-                    st.session_state.output_dir = output_dir
-                    st.success(f"✅ {script.total_lines}件の音声を生成しました")
+                        st.session_state.output_dir = output_dir
+                        st.success(f"✅ {script.total_lines}件の音声を生成しました")
                 except Exception as e:
                     st.error(f"❌ 音声生成エラー: {e}")
 
