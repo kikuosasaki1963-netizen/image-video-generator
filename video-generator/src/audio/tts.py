@@ -283,9 +283,14 @@ class TTSClient:
         self,
         script: Script,
         output_path: str | Path,
+        progress_callback: callable | None = None,
     ) -> Path:
-        """台本全体を1つの音声ファイルに変換（Gemini TTS優先・感情表現豊か）"""
-        return self._synthesize_script_sequential(script, output_path)
+        """台本全体を1つの音声ファイルに変換（Gemini TTS優先・感情表現豊か）
+
+        Args:
+            progress_callback: 進捗を報告するコールバック関数 (current, total, message) -> None
+        """
+        return self._synthesize_script_sequential(script, output_path, progress_callback)
 
     def _synthesize_script_cloud_primary(
         self,
@@ -339,8 +344,13 @@ class TTSClient:
         self,
         script: Script,
         output_path: str | Path,
+        progress_callback: callable | None = None,
     ) -> Path:
-        """各セリフを順番に生成して結合（Gemini TTS使用・感情表現あり）"""
+        """各セリフを順番に生成して結合（Gemini TTS使用・感情表現あり）
+
+        Args:
+            progress_callback: 進捗を報告するコールバック関数 (current, total, message) -> None
+        """
         try:
             import tempfile
             import time
@@ -348,7 +358,8 @@ class TTSClient:
             output_path = Path(output_path)
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
-            logger.info("台本音声合成開始（Gemini TTS）: %d行", len(script.lines))
+            total_lines = len(script.lines)
+            logger.info("台本音声合成開始（Gemini TTS）: %d行", total_lines)
 
             # クォータエラー発生フラグ（フォールバック用）
             use_cloud_fallback = False
@@ -359,17 +370,22 @@ class TTSClient:
                 for i, line in enumerate(script.lines):
                     temp_path = Path(temp_dir) / f"{i:03d}_{line.speaker}.wav"
 
+                    # 進捗をコールバックで報告
+                    if progress_callback:
+                        tts_type = "Cloud TTS" if use_cloud_fallback else "Gemini TTS"
+                        progress_callback(i, total_lines, f"{line.speaker} ({tts_type})")
+
                     if use_cloud_fallback:
                         # クォータ超過後はGoogle Cloud TTSを使用
-                        logger.info("セリフ %d/%d を生成中（Cloud TTS）: %s", i + 1, len(script.lines), line.speaker)
+                        logger.info("セリフ %d/%d を生成中（Cloud TTS）: %s", i + 1, total_lines, line.speaker)
                         wav_path = self._synthesize_cloud(line.text, line.speaker, temp_path)
                     else:
                         # Gemini TTS（感情表現あり）を試行
-                        logger.info("セリフ %d/%d を生成中（Gemini TTS）: %s", i + 1, len(script.lines), line.speaker)
+                        logger.info("セリフ %d/%d を生成中（Gemini TTS）: %s", i + 1, total_lines, line.speaker)
                         try:
                             wav_path = self._synthesize_gemini(line.text, line.speaker, temp_path)
                             # 成功した場合、レート制限を避けるため待機
-                            if i < len(script.lines) - 1:
+                            if i < total_lines - 1:
                                 time.sleep(0.5)
                         except TTSError as e:
                             if e.is_quota_error:

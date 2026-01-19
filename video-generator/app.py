@@ -183,9 +183,14 @@ def main_page() -> None:
 
                     if audio_mode == "一括生成（1本のファイル・推奨）":
                         # マルチスピーカー一括生成
+                        def update_progress(current, total, message):
+                            """進捗を更新するコールバック"""
+                            progress.progress((current + 1) / total)
+                            status.text(f"🎤 生成中: {current + 1}/{total} - {message}")
+
                         status.text("🎤 マルチスピーカー音声を一括生成中...")
                         output_path = audio_dir / "full_audio.wav"
-                        wav_path = tts.synthesize_script(script, output_path)
+                        wav_path = tts.synthesize_script(script, output_path, progress_callback=update_progress)
                         st.session_state.audio_files["full"] = str(wav_path)
                         progress.progress(1.0)
                         st.session_state.output_dir = output_dir
@@ -607,7 +612,7 @@ def main() -> None:
         )
 
         st.divider()
-        st.markdown("**バージョン:** 0.1.1")
+        st.markdown("**バージョン:** 0.1.2")
         st.markdown("[📖 ドキュメント](docs/requirements.md)")
 
     # ページルーティング
