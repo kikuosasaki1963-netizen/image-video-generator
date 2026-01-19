@@ -47,6 +47,8 @@ class ScriptParser:
 
     # 話者パターン: speaker1:, Speaker 1:, speaker 2: など（スペースあり/なし対応）
     SPEAKER_PATTERN = re.compile(r"^(speaker\s*\d+):\s*(.+)$", re.IGNORECASE)
+    # 話者のみのパターン（次の行にテキストがある場合）
+    SPEAKER_ONLY_PATTERN = re.compile(r"^(speaker\s*\d+):\s*$", re.IGNORECASE)
 
     def parse_file(self, file_path: str | Path) -> Script:
         """ファイルを解析して台本データを返す
@@ -110,23 +112,46 @@ class ScriptParser:
             return f.read()
 
     def _parse_content(self, content: str, filename: str) -> Script:
-        """コンテンツを解析"""
+        """コンテンツを解析（複数行形式にも対応）"""
         script = Script(filename=filename)
         line_number = 0
+        lines = content.split("\n")
+        i = 0
 
-        for raw_line in content.split("\n"):
-            raw_line = raw_line.strip()
+        while i < len(lines):
+            raw_line = lines[i].strip()
+            i += 1
+
             if not raw_line:
                 continue
 
+            # 同一行にテキストがある場合（Speaker 1: テキスト）
             match = self.SPEAKER_PATTERN.match(raw_line)
-            if not match:
-                continue
-
-            line_number += 1
-            # スペースを除去して正規化（"Speaker 1" → "speaker1"）
-            speaker = match.group(1).lower().replace(" ", "")
-            text = match.group(2)
+            if match:
+                line_number += 1
+                speaker = match.group(1).lower().replace(" ", "")
+                text = match.group(2)
+            else:
+                # 話者のみの行（次の行にテキスト）
+                speaker_only = self.SPEAKER_ONLY_PATTERN.match(raw_line)
+                if speaker_only:
+                    speaker = speaker_only.group(1).lower().replace(" ", "")
+                    # 次の行からテキストを取得
+                    text_lines = []
+                    while i < len(lines):
+                        next_line = lines[i].strip()
+                        # 次の話者が来たら終了
+                        if self.SPEAKER_PATTERN.match(next_line) or self.SPEAKER_ONLY_PATTERN.match(next_line):
+                            break
+                        if next_line:
+                            text_lines.append(next_line)
+                        i += 1
+                    text = " ".join(text_lines)
+                    if not text:
+                        continue
+                    line_number += 1
+                else:
+                    continue
 
             # 情景補足を抽出・除去
             scene_match = self.SCENE_PATTERN.search(text)
