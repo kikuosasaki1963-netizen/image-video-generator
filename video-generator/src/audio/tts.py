@@ -211,9 +211,9 @@ class TTSClient:
 
             logger.info("Gemini TTS 音声合成開始: speaker=%s, voice=%s", speaker, voice_name)
 
-            # シンプルなプロンプト（マルチスピーカー誤検知を防ぐ）
-            # 感情表現はテキスト自体の句読点や表現から自然に反映される
-            expressive_prompt = text
+            # TTS専用プロンプト - テキストをそのまま音声化することを明示
+            # 「Say:」プレフィックスでテキスト生成ではなく音声生成であることを明確化
+            expressive_prompt = f"Say: {text}"
 
             # Pro モデルを優先（クォータ別枠）、失敗時はFlashモデル
             models_to_try = ["gemini-2.5-pro-preview-tts", "gemini-2.5-flash-preview-tts"]
