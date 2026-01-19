@@ -28,8 +28,14 @@ class APIError(VideoGeneratorError):
 class TTSError(APIError):
     """Google Cloud TTS API エラー"""
 
-    def __init__(self, message: str, original_error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        original_error: Exception | None = None,
+        is_quota_error: bool = False,
+    ) -> None:
         super().__init__(message, "Google Cloud TTS", original_error)
+        self.is_quota_error = is_quota_error
 
 
 class ImageGenerationError(APIError):
