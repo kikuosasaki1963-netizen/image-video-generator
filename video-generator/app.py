@@ -154,12 +154,12 @@ def main_page() -> None:
                 try:
                     with st.spinner("音声を生成中..."):
                         tts = TTSClient()
-                        temp_path = Path("temp") / f"preview_{line.number}.mp3"
+                        temp_path = Path("temp") / f"preview_{line.number}.wav"
                         temp_path.parent.mkdir(exist_ok=True)
-                        tts.synthesize(line.text, line.speaker, temp_path)
+                        wav_path = tts.synthesize(line.text, line.speaker, temp_path)
 
-                        st.audio(str(temp_path), format="audio/mp3")
-                        st.session_state.audio_files[line.number] = str(temp_path)
+                        st.audio(str(wav_path), format="audio/wav")
+                        st.session_state.audio_files[line.number] = str(wav_path)
                 except Exception as e:
                     st.error(f"❌ 音声生成エラー: {e}")
 
@@ -300,9 +300,9 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
             audio_dir.mkdir(exist_ok=True)
 
             for i, line in enumerate(script.lines):
-                output_path = audio_dir / f"{line.number:03d}_{line.speaker}.mp3"
-                tts.synthesize(line.text, line.speaker, output_path)
-                st.session_state.audio_files[line.number] = str(output_path)
+                output_path = audio_dir / f"{line.number:03d}_{line.speaker}.wav"
+                wav_path = tts.synthesize(line.text, line.speaker, output_path)
+                st.session_state.audio_files[line.number] = str(wav_path)
                 progress.progress((i + 1) / (script.total_lines * 4))
 
         progress.progress(0.25)
@@ -314,17 +314,35 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
         image_dir.mkdir(exist_ok=True)
 
         generated_images = {}
-        for i, p in enumerate(prompts.prompts):
-            output_path = image_dir / f"{p.number:03d}_scene.png"
-            image_gen.generate(p.prompt, output_path)
-            generated_images[p.number] = str(output_path)
-            progress.progress(0.25 + (i + 1) / (prompts.total_images * 4))
+        if prompts.total_images == 0:
+            st.warning("⚠️ 画像プロンプトが0件です。プロンプトファイルの形式を確認してください。")
+        else:
+            stock_client = StockVideoClient()
+            for i, p in enumerate(prompts.prompts):
+                try:
+                    status.text(f"🖼️ 画像生成中: {i + 1}/{prompts.total_images}")
+                    output_path = image_dir / f"{p.number:03d}_scene.png"
+                    image_gen.generate(p.prompt, output_path)
+                    generated_images[p.number] = str(output_path)
+                except Exception as img_err:
+                    # AI生成失敗時はPexelsからストック画像を取得
+                    try:
+                        status.text(f"🖼️ ストック画像を検索中: {i + 1}/{prompts.total_images}")
+                        stock_path = image_dir / f"{p.number:03d}_stock.jpg"
+                        # プロンプトからキーワードを抽出して検索
+                        keywords = p.prompt.split()[:3]  # 最初の3単語をキーワードに
+                        search_query = " ".join(keywords) if keywords else "background"
+                        stock_client.download_image(search_query, stock_path)
+                        generated_images[p.number] = str(stock_path)
+                        st.info(f"📷 画像 {p.number}: ストック画像を使用")
+                    except Exception:
+                        st.warning(f"⚠️ 画像 {p.number} の生成に失敗（スキップ）")
+                progress.progress(0.25 + (i + 1) / (prompts.total_images * 4))
 
         progress.progress(0.5)
 
         # ステップ3: BGM生成
         status.text("🎵 BGMを生成中...")
-        bgm_client = BeatovenClient()
         bgm_dir = output_dir / "bgm"
         bgm_dir.mkdir(exist_ok=True)
 
@@ -333,7 +351,12 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
         total_duration = time_to_seconds(last_prompt.end_time) if last_prompt else 60
 
         bgm_path = bgm_dir / "background_music.mp3"
-        bgm_client.generate(int(total_duration), bgm_path)
+        try:
+            bgm_client = BeatovenClient()
+            bgm_client.generate(int(total_duration), bgm_path)
+        except Exception as bgm_err:
+            st.warning(f"⚠️ BGM生成に失敗（スキップ）: {bgm_err}")
+            bgm_path = None
 
         progress.progress(0.75)
 
@@ -373,12 +396,13 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
                     ))
 
             # BGMエントリ追加
-            timeline.add_entry(TimelineEntry(
-                start_time=0,
-                end_time=timeline.total_duration,
-                media_type="bgm",
-                file_path=str(bgm_path),
-            ))
+            if bgm_path and bgm_path.exists():
+                timeline.add_entry(TimelineEntry(
+                    start_time=0,
+                    end_time=timeline.total_duration,
+                    media_type="bgm",
+                    file_path=str(bgm_path),
+                ))
 
             # CSV出力
             timeline.to_csv(output_dir / "timeline.csv")
@@ -583,7 +607,7 @@ def main() -> None:
         )
 
         st.divider()
-        st.markdown("**バージョン:** 0.1.0")
+        st.markdown("**バージョン:** 0.1.1")
         st.markdown("[📖 ドキュメント](docs/requirements.md)")
 
     # ページルーティング
