@@ -45,8 +45,8 @@ class ScriptParser:
     # 読み仮名パターン: {漢字|読み} など
     READING_PATTERN = re.compile(r"\{([^|]+)\|([^}]+)\}")
 
-    # 話者パターン: speaker1: や speaker2: など
-    SPEAKER_PATTERN = re.compile(r"^(speaker\d+):\s*(.+)$", re.IGNORECASE)
+    # 話者パターン: speaker1:, Speaker 1:, speaker 2: など（スペースあり/なし対応）
+    SPEAKER_PATTERN = re.compile(r"^(speaker\s*\d+):\s*(.+)$", re.IGNORECASE)
 
     def parse_file(self, file_path: str | Path) -> Script:
         """ファイルを解析して台本データを返す
@@ -124,7 +124,8 @@ class ScriptParser:
                 continue
 
             line_number += 1
-            speaker = match.group(1).lower()
+            # スペースを除去して正規化（"Speaker 1" → "speaker1"）
+            speaker = match.group(1).lower().replace(" ", "")
             text = match.group(2)
 
             # 情景補足を抽出・除去
