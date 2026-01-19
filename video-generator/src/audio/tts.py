@@ -284,8 +284,8 @@ class TTSClient:
         script: Script,
         output_path: str | Path,
     ) -> Path:
-        """台本全体を1つの音声ファイルに変換（Google Cloud TTS優先）"""
-        return self._synthesize_script_cloud_primary(script, output_path)
+        """台本全体を1つの音声ファイルに変換（Gemini TTS優先・感情表現豊か）"""
+        return self._synthesize_script_sequential(script, output_path)
 
     def _synthesize_script_cloud_primary(
         self,
