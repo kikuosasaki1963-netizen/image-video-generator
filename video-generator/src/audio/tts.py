@@ -388,13 +388,15 @@ class TTSClient:
                             if i < total_lines - 1:
                                 time.sleep(0.5)
                         except TTSError as e:
-                            if e.is_quota_error:
-                                # クォータ超過：Google Cloud TTSにフォールバック
-                                logger.warning("Gemini TTS クォータ超過 - Google Cloud TTSに切り替え")
-                                use_cloud_fallback = True
-                                wav_path = self._synthesize_cloud(line.text, line.speaker, temp_path)
-                            else:
-                                raise
+                            # すべてのGemini TTSエラーでGoogle Cloud TTSにフォールバック
+                            logger.warning(f"Gemini TTS エラー - Google Cloud TTSに切り替え: {e.message}")
+                            use_cloud_fallback = True
+                            wav_path = self._synthesize_cloud(line.text, line.speaker, temp_path)
+                        except Exception as e:
+                            # 予期しないエラーでもGoogle Cloud TTSにフォールバック
+                            logger.warning(f"Gemini TTS 予期しないエラー - Google Cloud TTSに切り替え: {e}")
+                            use_cloud_fallback = True
+                            wav_path = self._synthesize_cloud(line.text, line.speaker, temp_path)
 
                     # WAVファイルを読み込み
                     with wave.open(str(wav_path), "rb") as wf:
