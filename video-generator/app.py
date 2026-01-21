@@ -64,6 +64,8 @@ def main_page() -> None:
         st.session_state.generation_complete = False
     if "output_dir" not in st.session_state:
         st.session_state.output_dir = None
+    if "audio_mode" not in st.session_state:
+        st.session_state.audio_mode = "batch"  # "batch" or "individual"
 
     # STEP 1: ファイルアップロード
     st.header("STEP 1: ファイルアップロード")
@@ -164,12 +166,17 @@ def main_page() -> None:
                     st.error(f"❌ 音声生成エラー: {e}")
 
             # 音声生成モード選択
+            audio_mode_options = ["一括生成（1本のファイル・推奨）", "個別生成（セリフごとのファイル）"]
+            default_index = 0 if st.session_state.audio_mode == "batch" else 1
             audio_mode = st.radio(
                 "音声生成モード",
-                ["一括生成（1本のファイル・推奨）", "個別生成（セリフごとのファイル）"],
+                audio_mode_options,
+                index=default_index,
                 horizontal=True,
                 help="一括生成: マルチスピーカーで自然な会話を1つのファイルに。個別生成: 各セリフを別々のファイルに。"
             )
+            # セッションステートに保存
+            st.session_state.audio_mode = "batch" if audio_mode == audio_mode_options[0] else "individual"
 
             if st.button("🔊 全セリフの音声を生成", type="primary"):
                 progress = st.progress(0)
@@ -181,7 +188,7 @@ def main_page() -> None:
                     audio_dir = output_dir / "audio"
                     audio_dir.mkdir(exist_ok=True)
 
-                    if audio_mode == "一括生成（1本のファイル・推奨）":
+                    if st.session_state.audio_mode == "batch":
                         # マルチスピーカー一括生成
                         def update_progress(current, total, message):
                             """進捗を更新するコールバック"""
@@ -298,17 +305,29 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
         st.session_state.output_dir = output_dir
 
         # ステップ1: 音声生成（まだ生成していない場合）
+        audio_mode = st.session_state.get("audio_mode", "batch")
         if not st.session_state.audio_files:
             status.text("🎤 音声を生成中...")
             tts = TTSClient()
             audio_dir = output_dir / "audio"
             audio_dir.mkdir(exist_ok=True)
 
-            for i, line in enumerate(script.lines):
-                output_path = audio_dir / f"{line.number:03d}_{line.speaker}.wav"
-                wav_path = tts.synthesize(line.text, line.speaker, output_path)
-                st.session_state.audio_files[line.number] = str(wav_path)
-                progress.progress((i + 1) / (script.total_lines * 4))
+            if audio_mode == "batch":
+                # 一括生成モード
+                def update_progress(current, total, message):
+                    progress.progress((current + 1) / (total * 4))
+                    status.text(f"🎤 生成中: {current + 1}/{total} - {message}")
+
+                output_path = audio_dir / "full_audio.wav"
+                wav_path = tts.synthesize_script(script, output_path, progress_callback=update_progress)
+                st.session_state.audio_files["full"] = str(wav_path)
+            else:
+                # 個別生成モード
+                for i, line in enumerate(script.lines):
+                    output_path = audio_dir / f"{line.number:03d}_{line.speaker}.wav"
+                    wav_path = tts.synthesize(line.text, line.speaker, output_path)
+                    st.session_state.audio_files[line.number] = str(wav_path)
+                    progress.progress((i + 1) / (script.total_lines * 4))
 
         progress.progress(0.25)
 
@@ -321,15 +340,18 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
         generated_images = {}
         if prompts.total_images == 0:
             st.warning("⚠️ 画像プロンプトが0件です。プロンプトファイルの形式を確認してください。")
+            st.info("💡 画像プロンプトの形式: `[1] 0:00-0:15 | プロンプト内容`")
         else:
+            st.info(f"🖼️ {prompts.total_images}件の画像を生成します...")
             stock_client = StockVideoClient()
             for i, p in enumerate(prompts.prompts):
                 try:
-                    status.text(f"🖼️ 画像生成中: {i + 1}/{prompts.total_images}")
+                    status.text(f"🖼️ 画像生成中: {i + 1}/{prompts.total_images} - {p.prompt[:30]}...")
                     output_path = image_dir / f"{p.number:03d}_scene.png"
                     image_gen.generate(p.prompt, output_path)
                     generated_images[p.number] = str(output_path)
                 except Exception as img_err:
+                    st.warning(f"⚠️ AI画像生成エラー（画像 {p.number}）: {img_err}")
                     # AI生成失敗時はPexelsからストック画像を取得
                     try:
                         status.text(f"🖼️ ストック画像を検索中: {i + 1}/{prompts.total_images}")
@@ -340,9 +362,15 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
                         stock_client.download_image(search_query, stock_path)
                         generated_images[p.number] = str(stock_path)
                         st.info(f"📷 画像 {p.number}: ストック画像を使用")
-                    except Exception:
-                        st.warning(f"⚠️ 画像 {p.number} の生成に失敗（スキップ）")
+                    except Exception as stock_err:
+                        st.warning(f"⚠️ ストック画像取得エラー（画像 {p.number}）: {stock_err}")
                 progress.progress(0.25 + (i + 1) / (prompts.total_images * 4))
+
+            # 画像生成結果サマリー
+            if generated_images:
+                st.success(f"✅ {len(generated_images)}/{prompts.total_images}件の画像を生成しました")
+            else:
+                st.error("❌ 画像を生成できませんでした")
 
         progress.progress(0.5)
 
@@ -371,24 +399,40 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
             timeline = Timeline()
 
             # 音声エントリ追加
-            current_time = 0.0
-            for line in script.lines:
-                if line.number in st.session_state.audio_files:
-                    from moviepy import AudioFileClip
+            from moviepy import AudioFileClip
 
-                    audio_path = st.session_state.audio_files[line.number]
-                    clip = AudioFileClip(audio_path)
-                    duration = clip.duration
-                    clip.close()
+            if "full" in st.session_state.audio_files:
+                # 一括生成モード: 1つの音声ファイル
+                audio_path = st.session_state.audio_files["full"]
+                clip = AudioFileClip(audio_path)
+                duration = clip.duration
+                clip.close()
 
-                    timeline.add_entry(TimelineEntry(
-                        start_time=current_time,
-                        end_time=current_time + duration,
-                        media_type="audio",
-                        file_path=audio_path,
-                        speaker=line.speaker,
-                    ))
-                    current_time += duration
+                timeline.add_entry(TimelineEntry(
+                    start_time=0.0,
+                    end_time=duration,
+                    media_type="audio",
+                    file_path=audio_path,
+                    speaker="all",
+                ))
+            else:
+                # 個別生成モード: 各セリフごとのファイル
+                current_time = 0.0
+                for line in script.lines:
+                    if line.number in st.session_state.audio_files:
+                        audio_path = st.session_state.audio_files[line.number]
+                        clip = AudioFileClip(audio_path)
+                        duration = clip.duration
+                        clip.close()
+
+                        timeline.add_entry(TimelineEntry(
+                            start_time=current_time,
+                            end_time=current_time + duration,
+                            media_type="audio",
+                            file_path=audio_path,
+                            speaker=line.speaker,
+                        ))
+                        current_time += duration
 
             # 画像エントリ追加
             for p in prompts.prompts:
@@ -419,24 +463,40 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
             timeline = Timeline()
 
             # タイムライン構築
-            current_time = 0.0
-            for line in script.lines:
-                if line.number in st.session_state.audio_files:
-                    from moviepy import AudioFileClip
+            from moviepy import AudioFileClip
 
-                    audio_path = st.session_state.audio_files[line.number]
-                    clip = AudioFileClip(audio_path)
-                    duration = clip.duration
-                    clip.close()
+            if "full" in st.session_state.audio_files:
+                # 一括生成モード
+                audio_path = st.session_state.audio_files["full"]
+                clip = AudioFileClip(audio_path)
+                duration = clip.duration
+                clip.close()
 
-                    timeline.add_entry(TimelineEntry(
-                        start_time=current_time,
-                        end_time=current_time + duration,
-                        media_type="audio",
-                        file_path=audio_path,
-                        speaker=line.speaker,
-                    ))
-                    current_time += duration
+                timeline.add_entry(TimelineEntry(
+                    start_time=0.0,
+                    end_time=duration,
+                    media_type="audio",
+                    file_path=audio_path,
+                    speaker="all",
+                ))
+            else:
+                # 個別生成モード
+                current_time = 0.0
+                for line in script.lines:
+                    if line.number in st.session_state.audio_files:
+                        audio_path = st.session_state.audio_files[line.number]
+                        clip = AudioFileClip(audio_path)
+                        duration = clip.duration
+                        clip.close()
+
+                        timeline.add_entry(TimelineEntry(
+                            start_time=current_time,
+                            end_time=current_time + duration,
+                            media_type="audio",
+                            file_path=audio_path,
+                            speaker=line.speaker,
+                        ))
+                        current_time += duration
 
             for p in prompts.prompts:
                 if p.number in generated_images:
