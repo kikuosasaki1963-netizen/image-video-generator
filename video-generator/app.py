@@ -38,6 +38,84 @@ def time_to_seconds(time_str: str) -> float:
     return 0.0
 
 
+def generate_image_prompts_from_script(script, num_images: int):
+    """台本から画像プロンプトを自動生成"""
+    from src.image.generator import ImagePrompt, ImagePromptList
+    from src.utils.config import get_env_var
+
+    api_key = get_env_var("GOOGLE_API_KEY")
+    if not api_key:
+        raise ValueError("GOOGLE_API_KEY が設定されていません")
+
+    import google.genai as genai
+
+    client = genai.Client(api_key=api_key)
+
+    # 台本の全テキストを結合
+    script_text = "\n".join([
+        f"{line.number}. [{line.speaker}]: {line.text}"
+        for line in script.lines
+    ])
+
+    # 1セリフあたりの推定秒数（音声生成前なので概算）
+    estimated_seconds_per_line = 5
+    total_duration = script.total_lines * estimated_seconds_per_line
+
+    prompt = f"""以下の台本を分析して、{num_images}枚の画像生成プロンプトを作成してください。
+
+【台本】
+{script_text}
+
+【要件】
+1. 各画像は台本の流れに沿ったシーンを表現する
+2. プロンプトは英語で、Gemini画像生成に適した詳細な描写
+3. アニメ/イラスト風のスタイルを指定
+4. 以下の形式で出力（各行1つのプロンプト）:
+
+[番号] 開始時間-終了時間 | 英語プロンプト
+
+例:
+[1] 0:00-0:10 | Anime style, two professional news anchors sitting at a modern studio desk, bright lighting, friendly expressions
+[2] 0:10-0:20 | Anime style, close-up of a surprised female character with wide eyes, speech bubble effect
+
+【注意】
+- 時間は0:00から始め、{total_duration}秒程度で終わるように均等に配分
+- 番号は1から{num_images}まで
+- 各プロンプトは具体的で視覚的な描写を含める
+- 日本語のテキストや文字は画像に含めない（テキストなしの画像）
+"""
+
+    response = client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=prompt,
+    )
+
+    # レスポンスをパース
+    from src.image.generator import ImageGenerator
+    generator = ImageGenerator()
+    result_text = response.text
+
+    prompt_list = generator.parse_prompt_text(result_text, "auto_generated")
+
+    # パースに失敗した場合、シンプルなプロンプトを生成
+    if prompt_list.total_images == 0:
+        # フォールバック: 手動でプロンプトを構築
+        interval = total_duration // num_images
+        prompts = []
+        for i in range(num_images):
+            start_time = f"{(i * interval) // 60}:{(i * interval) % 60:02d}"
+            end_time = f"{((i + 1) * interval) // 60}:{((i + 1) * interval) % 60:02d}"
+            prompts.append(ImagePrompt(
+                number=i + 1,
+                start_time=start_time,
+                end_time=end_time,
+                prompt=f"Anime style illustration related to: {script.lines[min(i, len(script.lines)-1)].text[:50]}"
+            ))
+        prompt_list = ImagePromptList(filename="auto_generated", prompts=prompts)
+
+    return prompt_list
+
+
 def get_output_dir() -> Path:
     """出力ディレクトリを取得"""
     settings = load_settings()
@@ -88,7 +166,7 @@ def main_page() -> None:
     with col2:
         st.subheader("🖼️ 画像プロンプトファイル")
         prompt_file = st.file_uploader(
-            "Word(.docx)またはテキスト(.txt)ファイルをアップロード",
+            "Word(.docx)またはテキスト(.txt)ファイルをアップロード（任意）",
             type=["docx", "txt"],
             key="prompt_file",
         )
@@ -97,6 +175,8 @@ def main_page() -> None:
             # プロンプトをパース
             generator = ImageGenerator()
             st.session_state.prompts = generator.parse_uploaded_file(prompt_file)
+        elif st.session_state.script and not st.session_state.prompts:
+            st.info("💡 画像プロンプトファイルがない場合、台本から自動生成できます")
 
     # STEP 2: 台本プレビュー（ファイルアップロード後に表示）
     script = st.session_state.script
@@ -122,6 +202,30 @@ def main_page() -> None:
         - `(...)` 形式の情景補足は自動除去されます
         - `{漢字|読み}` 形式で読み仮名を指定できます
         """)
+
+    # 画像プロンプト自動生成オプション
+    if script and not st.session_state.prompts:
+        st.subheader("🖼️ 画像プロンプト自動生成")
+        st.markdown("台本の内容からAIが自動的に画像プロンプトを生成します。")
+
+        # 画像枚数の設定
+        num_images = st.slider(
+            "生成する画像の枚数",
+            min_value=3,
+            max_value=min(20, script.total_lines),
+            value=min(6, script.total_lines),
+            help="台本の長さに応じて適切な枚数を選択してください"
+        )
+
+        if st.button("🎨 台本から画像プロンプトを自動生成", type="primary"):
+            with st.spinner("AIが台本を分析して画像プロンプトを生成中..."):
+                try:
+                    auto_prompts = generate_image_prompts_from_script(script, num_images)
+                    st.session_state.prompts = auto_prompts
+                    st.success(f"✅ {auto_prompts.total_images}件の画像プロンプトを生成しました")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ 画像プロンプト生成エラー: {e}")
 
     # 画像プロンプトのプレビュー
     prompts = st.session_state.prompts
