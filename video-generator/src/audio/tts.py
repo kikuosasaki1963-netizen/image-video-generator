@@ -382,21 +382,43 @@ class TTSClient:
                     else:
                         # Gemini TTS（感情表現あり）を試行
                         logger.info("セリフ %d/%d を生成中（Gemini TTS）: %s", i + 1, total_lines, line.speaker)
-                        try:
-                            wav_path = self._synthesize_gemini(line.text, line.speaker, temp_path)
-                            # 成功した場合、レート制限を避けるため待機
-                            if i < total_lines - 1:
-                                time.sleep(0.5)
-                        except TTSError as e:
-                            # すべてのGemini TTSエラーでGoogle Cloud TTSにフォールバック
-                            logger.warning(f"Gemini TTS エラー - Google Cloud TTSに切り替え: {e.message}")
-                            use_cloud_fallback = True
-                            wav_path = self._synthesize_cloud(line.text, line.speaker, temp_path)
-                        except Exception as e:
-                            # 予期しないエラーでもGoogle Cloud TTSにフォールバック
-                            logger.warning(f"Gemini TTS 予期しないエラー - Google Cloud TTSに切り替え: {e}")
-                            use_cloud_fallback = True
-                            wav_path = self._synthesize_cloud(line.text, line.speaker, temp_path)
+                        gemini_success = False
+                        for retry in range(2):  # 最大2回リトライ
+                            try:
+                                wav_path = self._synthesize_gemini(line.text, line.speaker, temp_path)
+                                gemini_success = True
+                                # 成功した場合、レート制限を避けるため待機
+                                if i < total_lines - 1:
+                                    time.sleep(0.5)
+                                break
+                            except TTSError as e:
+                                if e.is_quota_error:
+                                    # クォータ超過：以降すべてGoogle Cloud TTSに切り替え
+                                    logger.warning("Gemini TTS クォータ超過 - 以降Google Cloud TTSに切り替え")
+                                    use_cloud_fallback = True
+                                    break
+                                elif retry == 0:
+                                    # 1回目のエラー：少し待ってリトライ
+                                    logger.warning(f"Gemini TTS エラー、リトライ中: {e.message}")
+                                    time.sleep(1.0)
+                                else:
+                                    # 2回目も失敗：この行のみCloud TTSを使用
+                                    logger.warning(f"Gemini TTS リトライ失敗 - この行のみCloud TTS: {e.message}")
+                            except Exception as e:
+                                if retry == 0:
+                                    logger.warning(f"Gemini TTS 予期しないエラー、リトライ中: {e}")
+                                    time.sleep(1.0)
+                                else:
+                                    logger.warning(f"Gemini TTS リトライ失敗 - この行のみCloud TTS: {e}")
+
+                        # Gemini TTSが失敗した場合、この行のみCloud TTSを使用
+                        if not gemini_success:
+                            if not use_cloud_fallback:
+                                # クォータ超過でない場合は、この行のみCloud TTSを使用し、次の行はGemini TTSを再試行
+                                wav_path = self._synthesize_cloud(line.text, line.speaker, temp_path)
+                            else:
+                                # クォータ超過の場合
+                                wav_path = self._synthesize_cloud(line.text, line.speaker, temp_path)
 
                     # WAVファイルを読み込み
                     with wave.open(str(wav_path), "rb") as wf:
