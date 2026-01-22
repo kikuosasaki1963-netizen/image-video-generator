@@ -42,26 +42,28 @@ def generate_image_prompts_from_script(script, num_images: int):
     """台本から画像プロンプトを自動生成"""
     from src.image.generator import ImagePrompt, ImagePromptList
     from src.utils.config import get_env_var
+    import streamlit as st
 
     api_key = get_env_var("GOOGLE_API_KEY")
     if not api_key:
         raise ValueError("GOOGLE_API_KEY が設定されていません")
 
-    import google.genai as genai
-
-    client = genai.Client(api_key=api_key)
-
-    # 台本の全テキストを結合
-    script_text = "\n".join([
-        f"{line.number}. [{line.speaker}]: {line.text}"
-        for line in script.lines
-    ])
-
     # 1セリフあたりの推定秒数（音声生成前なので概算）
     estimated_seconds_per_line = 5
     total_duration = script.total_lines * estimated_seconds_per_line
 
-    prompt = f"""以下の台本を分析して、{num_images}枚の画像生成プロンプトを作成してください。
+    try:
+        import google.genai as genai
+
+        client = genai.Client(api_key=api_key)
+
+        # 台本の全テキストを結合
+        script_text = "\n".join([
+            f"{line.number}. [{line.speaker}]: {line.text}"
+            for line in script.lines
+        ])
+
+        prompt = f"""以下の台本を分析して、{num_images}枚の画像生成プロンプトを作成してください。
 
 【台本】
 {script_text}
@@ -85,35 +87,55 @@ def generate_image_prompts_from_script(script, num_images: int):
 - 日本語のテキストや文字は画像に含めない（テキストなしの画像）
 """
 
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=prompt,
-    )
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt,
+        )
 
-    # レスポンスをパース
-    from src.image.generator import ImageGenerator
-    generator = ImageGenerator()
-    result_text = response.text
+        # レスポンスをパース
+        from src.image.generator import ImageGenerator
+        generator = ImageGenerator()
+        result_text = response.text
 
-    prompt_list = generator.parse_prompt_text(result_text, "auto_generated")
+        prompt_list = generator.parse_prompt_text(result_text, "auto_generated")
 
-    # パースに失敗した場合、シンプルなプロンプトを生成
-    if prompt_list.total_images == 0:
-        # フォールバック: 手動でプロンプトを構築
-        interval = total_duration // num_images
-        prompts = []
-        for i in range(num_images):
-            start_time = f"{(i * interval) // 60}:{(i * interval) % 60:02d}"
-            end_time = f"{((i + 1) * interval) // 60}:{((i + 1) * interval) % 60:02d}"
-            prompts.append(ImagePrompt(
-                number=i + 1,
-                start_time=start_time,
-                end_time=end_time,
-                prompt=f"Anime style illustration related to: {script.lines[min(i, len(script.lines)-1)].text[:50]}"
-            ))
-        prompt_list = ImagePromptList(filename="auto_generated", prompts=prompts)
+        if prompt_list.total_images > 0:
+            return prompt_list
 
-    return prompt_list
+        # パースに失敗した場合はフォールバックへ
+        st.warning(f"⚠️ AIレスポンスのパースに失敗。フォールバックを使用します。")
+
+    except Exception as e:
+        st.warning(f"⚠️ AI生成エラー: {e}。フォールバックを使用します。")
+
+    # フォールバック: 台本から直接プロンプトを構築
+    interval = max(1, total_duration // num_images)
+    prompts = []
+
+    # 各セリフからキーワードを抽出してプロンプトを生成
+    lines_per_image = max(1, len(script.lines) // num_images)
+
+    for i in range(num_images):
+        start_sec = i * interval
+        end_sec = (i + 1) * interval
+        start_time = f"{start_sec // 60}:{start_sec % 60:02d}"
+        end_time = f"{end_sec // 60}:{end_sec % 60:02d}"
+
+        # 対応するセリフからコンテキストを取得
+        line_idx = min(i * lines_per_image, len(script.lines) - 1)
+        context = script.lines[line_idx].text[:100]
+
+        # 日本語のコンテキストから英語プロンプトを生成
+        prompt_text = f"Anime style, colorful illustration, professional quality, scene depicting: {context}"
+
+        prompts.append(ImagePrompt(
+            number=i + 1,
+            start_time=start_time,
+            end_time=end_time,
+            prompt=prompt_text,
+        ))
+
+    return ImagePromptList(filename="auto_generated", prompts=prompts)
 
 
 def get_output_dir() -> Path:
@@ -442,9 +464,18 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
         image_dir.mkdir(exist_ok=True)
 
         generated_images = {}
+
+        # 画像プロンプトがない場合は自動生成
         if prompts.total_images == 0:
-            st.warning("⚠️ 画像プロンプトが0件です。プロンプトファイルの形式を確認してください。")
-            st.info("💡 画像プロンプトの形式: `[1] 0:00-0:15 | プロンプト内容`")
+            st.info("🎨 画像プロンプトを自動生成中...")
+            try:
+                auto_prompts = generate_image_prompts_from_script(script, min(6, script.total_lines))
+                prompts = auto_prompts
+                st.session_state.prompts = auto_prompts
+                st.success(f"✅ {prompts.total_images}件の画像プロンプトを自動生成しました")
+            except Exception as auto_err:
+                st.warning(f"⚠️ 画像プロンプト自動生成エラー: {auto_err}")
+                st.info("💡 手動で画像プロンプトファイルをアップロードしてください")
         else:
             st.info(f"🖼️ {prompts.total_images}件の画像を生成します...")
             stock_client = StockVideoClient()
