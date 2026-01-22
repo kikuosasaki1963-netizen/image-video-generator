@@ -38,17 +38,36 @@ def time_to_seconds(time_str: str) -> float:
     return 0.0
 
 
-def count_script_items(script) -> int:
-    """台本から項数を検出（1, 2, 3... の番号から最大値を取得）"""
+def count_script_items_from_content(content: str) -> int:
+    """テキストから項数を検出（1, 2, 3... の番号から最大値を取得）"""
     import re
+    max_item = 0
+
+    # 各行をスキャン
+    for line in content.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+
+        # 行頭の番号を検出（例: "1.", "1:", "1 ", "1）", "1)"）
+        match = re.match(r'^(\d+)[.:\s）\)、]', line)
+        if match:
+            num = int(match.group(1))
+            max_item = max(max_item, num)
+
+    return max_item
+
+
+def count_script_items(script) -> int:
+    """台本から項数を検出（後方互換用）"""
     max_item = 0
 
     for line in script.lines:
         # 元のテキストから番号を検出
         text = line.original_text if hasattr(line, 'original_text') else line.text
 
-        # 行頭の番号を検出（例: "1.", "1:", "1 ", "1）"）
-        match = re.match(r'^(\d+)[.:\s）\)]', text)
+        import re
+        match = re.match(r'^(\d+)[.:\s）\)、]', text)
         if match:
             num = int(match.group(1))
             max_item = max(max_item, num)
@@ -185,6 +204,8 @@ def main_page() -> None:
         st.session_state.output_dir = None
     if "audio_mode" not in st.session_state:
         st.session_state.audio_mode = "batch"  # "batch" or "individual"
+    if "script_raw_content" not in st.session_state:
+        st.session_state.script_raw_content = ""
 
     # STEP 1: ファイルアップロード
     st.header("STEP 1: ファイルアップロード")
@@ -200,6 +221,16 @@ def main_page() -> None:
         )
         if script_file:
             st.success(f"✅ {script_file.name} をアップロードしました")
+            # 生のコンテンツを保存（項数検出用）
+            if script_file.name.lower().endswith(".docx"):
+                from io import BytesIO
+                from docx import Document
+                doc = Document(BytesIO(script_file.getvalue()))
+                st.session_state.script_raw_content = "\n".join(para.text for para in doc.paragraphs)
+                script_file.seek(0)  # ファイルポインタをリセット
+            else:
+                st.session_state.script_raw_content = script_file.getvalue().decode("utf-8")
+                script_file.seek(0)  # ファイルポインタをリセット
             # 台本をパース
             parser = ScriptParser()
             st.session_state.script = parser.parse_uploaded_file(script_file)
@@ -249,9 +280,18 @@ def main_page() -> None:
         st.subheader("🖼️ 画像プロンプト自動生成")
         st.markdown("台本の内容からAIが自動的に画像プロンプトを生成します。")
 
-        # 台本から項数を自動検出
-        detected_items = count_script_items(script)
-        st.info(f"📊 台本から検出された項数: {detected_items}")
+        # 台本から項数を自動検出（生コンテンツから）
+        raw_content = st.session_state.get("script_raw_content", "")
+        if raw_content:
+            detected_items = count_script_items_from_content(raw_content)
+        else:
+            detected_items = count_script_items(script)
+
+        if detected_items > 0:
+            st.info(f"📊 台本から検出された項数: {detected_items}")
+        else:
+            detected_items = script.total_lines
+            st.info(f"📊 項番号が検出されませんでした。行数を使用: {detected_items}")
 
         # 画像枚数の設定
         num_images = st.number_input(
@@ -490,8 +530,16 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
 
         # 画像プロンプトがない場合は自動生成
         if prompts.total_images == 0:
-            # 台本から項数を検出して画像枚数を決定
-            detected_items = count_script_items(script)
+            # 台本から項数を検出して画像枚数を決定（生コンテンツから）
+            raw_content = st.session_state.get("script_raw_content", "")
+            if raw_content:
+                detected_items = count_script_items_from_content(raw_content)
+            else:
+                detected_items = count_script_items(script)
+
+            if detected_items == 0:
+                detected_items = script.total_lines
+
             calculated_images = min(detected_items, 100)
             st.info(f"🎨 {calculated_images}件の画像プロンプトを自動生成中（検出された項数: {detected_items}）...")
             try:
