@@ -70,21 +70,21 @@ def generate_image_prompts_from_script(script, num_images: int):
 
 【要件】
 1. 各画像は台本の流れに沿ったシーンを表現する
-2. プロンプトは英語で、Gemini画像生成に適した詳細な描写
+2. プロンプトは日本語で、詳細な視覚的描写を含める
 3. アニメ/イラスト風のスタイルを指定
 4. 以下の形式で出力（各行1つのプロンプト）:
 
-[番号] 開始時間-終了時間 | 英語プロンプト
+[番号] 開始時間-終了時間 | 日本語プロンプト
 
 例:
-[1] 0:00-0:10 | Anime style, two professional news anchors sitting at a modern studio desk, bright lighting, friendly expressions
-[2] 0:10-0:20 | Anime style, close-up of a surprised female character with wide eyes, speech bubble effect
+[1] 0:00-0:10 | アニメ風、明るいスタジオで並んで座る2人のプロのニュースキャスター、フレンドリーな表情
+[2] 0:10-0:20 | アニメ風、驚いた表情の女性キャラクターのクローズアップ、目を大きく見開いている
 
 【注意】
 - 時間は0:00から始め、{total_duration}秒程度で終わるように均等に配分
 - 番号は1から{num_images}まで
 - 各プロンプトは具体的で視覚的な描写を含める
-- 日本語のテキストや文字は画像に含めない（テキストなしの画像）
+- 台本の内容に合った適切なシーンを描写する
 """
 
         response = client.models.generate_content(
@@ -125,8 +125,8 @@ def generate_image_prompts_from_script(script, num_images: int):
         line_idx = min(i * lines_per_image, len(script.lines) - 1)
         context = script.lines[line_idx].text[:100]
 
-        # 日本語のコンテキストから英語プロンプトを生成
-        prompt_text = f"Anime style, colorful illustration, professional quality, scene depicting: {context}"
+        # 日本語プロンプトを生成
+        prompt_text = f"アニメ風イラスト、カラフル、高品質、シーン: {context}"
 
         prompts.append(ImagePrompt(
             number=i + 1,
