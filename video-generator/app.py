@@ -230,14 +230,13 @@ def main_page() -> None:
         st.subheader("🖼️ 画像プロンプト自動生成")
         st.markdown("台本の内容からAIが自動的に画像プロンプトを生成します。")
 
-        # 画像枚数の設定（5行につき1枚を推奨）
-        recommended_images = max(3, min(30, script.total_lines // 5))
-        num_images = st.slider(
+        # 画像枚数の設定
+        num_images = st.number_input(
             "生成する画像の枚数",
-            min_value=3,
-            max_value=min(30, script.total_lines),
-            value=recommended_images,
-            help=f"台本{script.total_lines}行に対して、推奨: {recommended_images}枚（5行につき1枚）"
+            min_value=1,
+            max_value=100,
+            value=min(script.total_lines, 50),
+            help="台本の数に合わせて画像枚数を指定してください"
         )
 
         if st.button("🎨 台本から画像プロンプトを自動生成", type="primary"):
@@ -468,8 +467,8 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
 
         # 画像プロンプトがない場合は自動生成
         if prompts.total_images == 0:
-            # 台本の長さに応じた画像枚数を計算（5行につき1枚、最低3枚、最大30枚）
-            calculated_images = max(3, min(30, script.total_lines // 5))
+            # 台本の行数と同じ枚数を生成（最大50枚）
+            calculated_images = min(script.total_lines, 50)
             st.info(f"🎨 {calculated_images}件の画像プロンプトを自動生成中...")
             try:
                 auto_prompts = generate_image_prompts_from_script(script, calculated_images)
