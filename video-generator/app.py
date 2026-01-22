@@ -38,6 +38,25 @@ def time_to_seconds(time_str: str) -> float:
     return 0.0
 
 
+def count_script_items(script) -> int:
+    """台本から項数を検出（1, 2, 3... の番号から最大値を取得）"""
+    import re
+    max_item = 0
+
+    for line in script.lines:
+        # 元のテキストから番号を検出
+        text = line.original_text if hasattr(line, 'original_text') else line.text
+
+        # 行頭の番号を検出（例: "1.", "1:", "1 ", "1）"）
+        match = re.match(r'^(\d+)[.:\s）\)]', text)
+        if match:
+            num = int(match.group(1))
+            max_item = max(max_item, num)
+
+    # 番号が見つからない場合は行数を返す
+    return max_item if max_item > 0 else script.total_lines
+
+
 def generate_image_prompts_from_script(script, num_images: int):
     """台本から画像プロンプトを自動生成"""
     from src.image.generator import ImagePrompt, ImagePromptList
@@ -230,13 +249,17 @@ def main_page() -> None:
         st.subheader("🖼️ 画像プロンプト自動生成")
         st.markdown("台本の内容からAIが自動的に画像プロンプトを生成します。")
 
+        # 台本から項数を自動検出
+        detected_items = count_script_items(script)
+        st.info(f"📊 台本から検出された項数: {detected_items}")
+
         # 画像枚数の設定
         num_images = st.number_input(
             "生成する画像の枚数",
             min_value=1,
             max_value=100,
-            value=min(script.total_lines, 50),
-            help="台本の数に合わせて画像枚数を指定してください"
+            value=min(detected_items, 100),
+            help=f"台本から{detected_items}項を検出しました。必要に応じて調整してください。"
         )
 
         if st.button("🎨 台本から画像プロンプトを自動生成", type="primary"):
@@ -467,9 +490,10 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
 
         # 画像プロンプトがない場合は自動生成
         if prompts.total_images == 0:
-            # 台本の行数と同じ枚数を生成（最大50枚）
-            calculated_images = min(script.total_lines, 50)
-            st.info(f"🎨 {calculated_images}件の画像プロンプトを自動生成中...")
+            # 台本から項数を検出して画像枚数を決定
+            detected_items = count_script_items(script)
+            calculated_images = min(detected_items, 100)
+            st.info(f"🎨 {calculated_images}件の画像プロンプトを自動生成中（検出された項数: {detected_items}）...")
             try:
                 auto_prompts = generate_image_prompts_from_script(script, calculated_images)
                 prompts = auto_prompts
