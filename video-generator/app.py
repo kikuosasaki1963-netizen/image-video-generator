@@ -476,7 +476,9 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
             except Exception as auto_err:
                 st.warning(f"⚠️ 画像プロンプト自動生成エラー: {auto_err}")
                 st.info("💡 手動で画像プロンプトファイルをアップロードしてください")
-        else:
+
+        # 画像生成（プロンプトがある場合のみ）
+        if prompts.total_images > 0:
             st.info(f"🖼️ {prompts.total_images}件の画像を生成します...")
             stock_client = StockVideoClient()
             for i, p in enumerate(prompts.prompts):
@@ -485,6 +487,7 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
                     output_path = image_dir / f"{p.number:03d}_scene.png"
                     image_gen.generate(p.prompt, output_path)
                     generated_images[p.number] = str(output_path)
+                    st.success(f"✅ 画像 {p.number} 生成完了")
                 except Exception as img_err:
                     st.warning(f"⚠️ AI画像生成エラー（画像 {p.number}）: {img_err}")
                     # AI生成失敗時はPexelsからストック画像を取得
@@ -506,6 +509,8 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
                 st.success(f"✅ {len(generated_images)}/{prompts.total_images}件の画像を生成しました")
             else:
                 st.error("❌ 画像を生成できませんでした")
+        else:
+            st.error("❌ 画像プロンプトがないため、画像生成をスキップしました")
 
         progress.progress(0.5)
 
