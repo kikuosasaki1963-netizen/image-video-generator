@@ -260,3 +260,62 @@ class StockVideoClient:
             error_msg = f"動画のダウンロードに失敗 (id={video.id}): {e}"
             logger.error(error_msg)
             raise StockVideoError(error_msg, source=video.source, original_error=e)
+
+    def download_image(self, query: str, output_path: str | Path) -> Path:
+        """Pexelsからストック画像を検索してダウンロード
+
+        Args:
+            query: 検索キーワード
+            output_path: 出力ファイルパス
+
+        Returns:
+            出力ファイルのパス
+
+        Raises:
+            StockVideoError: 画像取得に失敗した場合
+        """
+        if not self._pexels_key:
+            raise StockVideoError("PEXELS_API_KEY が設定されていません", source="Pexels")
+
+        try:
+            # Pexels Photos APIで検索
+            headers = {"Authorization": self._pexels_key}
+            params = {"query": query, "per_page": 1, "orientation": "landscape"}
+
+            response = requests.get(
+                "https://api.pexels.com/v1/search",
+                headers=headers,
+                params=params,
+                timeout=SEARCH_TIMEOUT,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            photos = data.get("photos", [])
+            if not photos:
+                raise StockVideoError(f"画像が見つかりません: {query}", source="Pexels")
+
+            # 最初の画像のURLを取得（large サイズ）
+            photo = photos[0]
+            image_url = photo.get("src", {}).get("large", photo.get("src", {}).get("original"))
+
+            if not image_url:
+                raise StockVideoError("画像URLが取得できません", source="Pexels")
+
+            # 画像をダウンロード
+            output_path = Path(output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            img_response = requests.get(image_url, timeout=DOWNLOAD_TIMEOUT)
+            img_response.raise_for_status()
+
+            with open(output_path, "wb") as f:
+                f.write(img_response.content)
+
+            logger.info("ストック画像ダウンロード完了: %s", output_path)
+            return output_path
+
+        except requests.exceptions.RequestException as e:
+            error_msg = f"ストック画像の取得に失敗: {e}"
+            logger.error(error_msg)
+            raise StockVideoError(error_msg, source="Pexels", original_error=e)
