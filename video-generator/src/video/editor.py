@@ -108,7 +108,7 @@ class VideoEditor:
         for entry in timeline.entries:
             if entry.media_type == "audio":
                 clip = AudioFileClip(entry.file_path)
-                clip = clip.set_start(entry.start_time)
+                clip = clip.with_start(entry.start_time)
                 audio_clips.append(clip)
 
         # 画像クリップを作成
@@ -118,9 +118,9 @@ class VideoEditor:
                 duration = entry.end_time - entry.start_time
                 clip = (
                     ImageClip(entry.file_path)
-                    .set_duration(duration)
-                    .set_start(entry.start_time)
-                    .resize((width, height))
+                    .with_duration(duration)
+                    .with_start(entry.start_time)
+                    .resized((width, height))
                 )
                 image_clips.append(clip)
 
@@ -132,17 +132,17 @@ class VideoEditor:
                 loops_needed = int(timeline.total_duration / bgm_clip.duration) + 1
                 bgm_clips = [bgm_clip] * loops_needed
                 bgm_clip = concatenate_audioclips(bgm_clips)
-            bgm_clip = bgm_clip.subclip(0, timeline.total_duration)
-            bgm_clip = bgm_clip.volumex(bgm_volume)
+            bgm_clip = bgm_clip.subclipped(0, timeline.total_duration)
+            bgm_clip = bgm_clip.with_volume_scaled(bgm_volume)
             audio_clips.append(bgm_clip)
 
         # 合成
         video = CompositeVideoClip(image_clips, size=(width, height))
         if audio_clips:
             audio = CompositeAudioClip(audio_clips)
-            video = video.set_audio(audio)
+            video = video.with_audio(audio)
 
-        video = video.set_duration(timeline.total_duration)
+        video = video.with_duration(timeline.total_duration)
 
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
