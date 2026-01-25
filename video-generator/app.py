@@ -147,11 +147,17 @@ def generate_image_prompts_from_script(script, num_images: int):
         st.warning(f"⚠️ AI生成エラー: {e}。フォールバックを使用します。")
 
     # フォールバック: 台本から直接プロンプトを構築
+    # ゼロ除算を防止
+    if num_images <= 0:
+        num_images = max(1, script.total_lines)
+    if total_duration <= 0:
+        total_duration = num_images * 5  # デフォルト5秒/画像
+
     interval = max(1, total_duration // num_images)
     prompts = []
 
     # 各セリフからキーワードを抽出してプロンプトを生成
-    lines_per_image = max(1, len(script.lines) // num_images)
+    lines_per_image = max(1, len(script.lines) // num_images) if num_images > 0 else 1
 
     for i in range(num_images):
         start_sec = i * interval
