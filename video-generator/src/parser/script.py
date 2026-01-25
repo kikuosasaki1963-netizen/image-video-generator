@@ -176,4 +176,69 @@ class ScriptParser:
             )
             script.lines.append(line)
 
+        # Speaker形式が見つからなかった場合、フォールバックパーサーを使用
+        if not script.lines:
+            script = self._parse_content_fallback(content, filename)
+
+        return script
+
+    def _parse_content_fallback(self, content: str, filename: str) -> Script:
+        """フォールバックパーサー: 番号付き行または通常のテキスト行を解析"""
+        script = Script(filename=filename)
+        lines = content.split("\n")
+
+        # 番号付き行のパターン（1. テキスト、1: テキスト、1) テキスト など）
+        numbered_pattern = re.compile(r"^(\d+)[.:\)）、\s]+(.+)$")
+
+        line_number = 0
+        current_speaker = "speaker1"  # デフォルト話者
+
+        for raw_line in lines:
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
+
+            # 番号付き行をチェック
+            match = numbered_pattern.match(raw_line)
+            if match:
+                line_number += 1
+                text = match.group(2).strip()
+                # 話者を交互に切り替え
+                current_speaker = "speaker1" if line_number % 2 == 1 else "speaker2"
+            else:
+                # 通常のテキスト行（5文字以上の行のみ対象）
+                if len(raw_line) >= 5:
+                    line_number += 1
+                    text = raw_line
+                    current_speaker = "speaker1" if line_number % 2 == 1 else "speaker2"
+                else:
+                    continue
+
+            # 情景補足を抽出・除去
+            scene_match = self.SCENE_PATTERN.search(text)
+            scene_description = scene_match.group(1) if scene_match else None
+            clean_text = self.SCENE_PATTERN.sub("", text).strip()
+
+            if not clean_text:
+                line_number -= 1  # 空になった場合は行番号を戻す
+                continue
+
+            # 読み仮名を抽出
+            reading_hints: dict[str, str] = {}
+            for kanji, reading in self.READING_PATTERN.findall(clean_text):
+                reading_hints[kanji] = reading
+
+            # 読み仮名を展開
+            final_text = self.READING_PATTERN.sub(r"\2", clean_text)
+
+            line = Line(
+                number=line_number,
+                speaker=current_speaker,
+                text=final_text,
+                original_text=text,
+                scene_description=scene_description,
+                reading_hints=reading_hints,
+            )
+            script.lines.append(line)
+
         return script

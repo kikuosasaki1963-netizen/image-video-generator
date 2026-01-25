@@ -525,6 +525,19 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
     status = st.empty()
 
     try:
+        # 早期バリデーション: 台本の確認
+        if not script or not script.lines or len(script.lines) == 0:
+            st.error("❌ 台本が空です。セリフが含まれるファイルをアップロードしてください。")
+            st.info("""
+            💡 **対応フォーマット:**
+            - `Speaker 1: セリフ` 形式
+            - `1. セリフ` 形式（番号付き）
+            - 通常のテキスト行（5文字以上）
+
+            ファイルを確認して、セリフが含まれていることを確認してください。
+            """)
+            return
+
         output_dir = st.session_state.output_dir or get_output_dir()
         st.session_state.output_dir = output_dir
 
@@ -652,14 +665,29 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
             timeline = Timeline()
 
             # 音声エントリ追加
-            from moviepy import AudioFileClip
+            def get_audio_duration(audio_path: str) -> float:
+                """音声ファイルの長さを取得（エラー時はフォールバック）"""
+                try:
+                    from moviepy import AudioFileClip
+                    clip = AudioFileClip(audio_path)
+                    duration = clip.duration
+                    clip.close()
+                    return duration if duration else 5.0
+                except Exception as e:
+                    st.warning(f"⚠️ 音声長さ取得エラー: {e}")
+                    # フォールバック: ファイルサイズから推定（16bit 24kHz mono）
+                    import os
+                    try:
+                        file_size = os.path.getsize(audio_path)
+                        # WAV: 48000 bytes/sec (24000Hz * 2bytes * 1ch)
+                        return max(1.0, file_size / 48000)
+                    except:
+                        return 5.0  # デフォルト5秒
 
             if "full" in st.session_state.audio_files:
                 # 一括生成モード: 1つの音声ファイル
                 audio_path = st.session_state.audio_files["full"]
-                clip = AudioFileClip(audio_path)
-                duration = clip.duration
-                clip.close()
+                duration = get_audio_duration(audio_path)
 
                 timeline.add_entry(TimelineEntry(
                     start_time=0.0,
@@ -674,9 +702,7 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
                 for line in script.lines:
                     if line.number in st.session_state.audio_files:
                         audio_path = st.session_state.audio_files[line.number]
-                        clip = AudioFileClip(audio_path)
-                        duration = clip.duration
-                        clip.close()
+                        duration = get_audio_duration(audio_path)
 
                         timeline.add_entry(TimelineEntry(
                             start_time=current_time,
@@ -715,15 +741,27 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
             editor = VideoEditor()
             timeline = Timeline()
 
-            # タイムライン構築
-            from moviepy import AudioFileClip
+            # 音声ファイルの長さを取得（エラー時はフォールバック）
+            def get_audio_duration_auto(audio_path: str) -> float:
+                try:
+                    from moviepy import AudioFileClip
+                    clip = AudioFileClip(audio_path)
+                    duration = clip.duration
+                    clip.close()
+                    return duration if duration else 5.0
+                except Exception as e:
+                    st.warning(f"⚠️ 音声長さ取得エラー: {e}")
+                    import os
+                    try:
+                        file_size = os.path.getsize(audio_path)
+                        return max(1.0, file_size / 48000)
+                    except:
+                        return 5.0
 
             if "full" in st.session_state.audio_files:
                 # 一括生成モード
                 audio_path = st.session_state.audio_files["full"]
-                clip = AudioFileClip(audio_path)
-                duration = clip.duration
-                clip.close()
+                duration = get_audio_duration_auto(audio_path)
 
                 timeline.add_entry(TimelineEntry(
                     start_time=0.0,
@@ -738,9 +776,7 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
                 for line in script.lines:
                     if line.number in st.session_state.audio_files:
                         audio_path = st.session_state.audio_files[line.number]
-                        clip = AudioFileClip(audio_path)
-                        duration = clip.duration
-                        clip.close()
+                        duration = get_audio_duration_auto(audio_path)
 
                         timeline.add_entry(TimelineEntry(
                             start_time=current_time,
