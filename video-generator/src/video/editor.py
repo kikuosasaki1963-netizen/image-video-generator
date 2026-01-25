@@ -124,17 +124,21 @@ class VideoEditor:
                 )
                 image_clips.append(clip)
 
-        # BGMを追加
-        if bgm_path:
-            bgm_clip = AudioFileClip(str(bgm_path))
-            if bgm_clip.duration < timeline.total_duration:
-                # ループ処理
-                loops_needed = int(timeline.total_duration / bgm_clip.duration) + 1
-                bgm_clips = [bgm_clip] * loops_needed
-                bgm_clip = concatenate_audioclips(bgm_clips)
-            bgm_clip = bgm_clip.subclipped(0, timeline.total_duration)
-            bgm_clip = bgm_clip.with_volume_scaled(bgm_volume)
-            audio_clips.append(bgm_clip)
+        # BGMを追加（ファイルが存在する場合のみ）
+        if bgm_path and Path(bgm_path).exists():
+            try:
+                bgm_clip = AudioFileClip(str(bgm_path))
+                if bgm_clip.duration and bgm_clip.duration < timeline.total_duration:
+                    # ループ処理
+                    loops_needed = int(timeline.total_duration / bgm_clip.duration) + 1
+                    bgm_clips = [bgm_clip] * loops_needed
+                    bgm_clip = concatenate_audioclips(bgm_clips)
+                bgm_clip = bgm_clip.subclipped(0, timeline.total_duration)
+                bgm_clip = bgm_clip.with_volume_scaled(bgm_volume)
+                audio_clips.append(bgm_clip)
+            except Exception as e:
+                # BGM読み込みエラーはスキップ（動画生成は続行）
+                print(f"BGM読み込みエラー（スキップ）: {e}")
 
         # 合成
         video = CompositeVideoClip(image_clips, size=(width, height))

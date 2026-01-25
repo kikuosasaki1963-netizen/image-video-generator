@@ -653,6 +653,10 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
         try:
             bgm_client = BeatovenClient()
             bgm_client.generate(int(total_duration), bgm_path)
+            # ファイルが実際に作成されたか確認
+            if not bgm_path.exists():
+                st.warning("⚠️ BGMファイルが作成されませんでした（スキップ）")
+                bgm_path = None
         except Exception as bgm_err:
             st.warning(f"⚠️ BGM生成に失敗（スキップ）: {bgm_err}")
             bgm_path = None
