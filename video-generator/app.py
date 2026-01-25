@@ -86,9 +86,18 @@ def generate_image_prompts_from_script(script, num_images: int):
     if not api_key:
         raise ValueError("GOOGLE_API_KEY が設定されていません")
 
+    # ゼロ除算防止: 入力値の検証
+    if num_images <= 0:
+        num_images = max(1, script.total_lines if script.total_lines > 0 else 1)
+
+    # 台本が空の場合の対応
+    if not script.lines or len(script.lines) == 0:
+        raise ValueError("台本が空です。セリフが含まれるファイルをアップロードしてください。")
+
     # 1セリフあたりの推定秒数（音声生成前なので概算）
     estimated_seconds_per_line = 5
-    total_duration = script.total_lines * estimated_seconds_per_line
+    total_lines = max(1, script.total_lines)  # 0除算防止
+    total_duration = total_lines * estimated_seconds_per_line
 
     try:
         import google.genai as genai
@@ -149,15 +158,35 @@ def generate_image_prompts_from_script(script, num_images: int):
     # フォールバック: 台本から直接プロンプトを構築
     # ゼロ除算を防止
     if num_images <= 0:
-        num_images = max(1, script.total_lines)
+        num_images = max(1, len(script.lines) if script.lines else 1)
     if total_duration <= 0:
-        total_duration = num_images * 5  # デフォルト5秒/画像
+        total_duration = max(num_images * 5, 5)  # デフォルト5秒/画像、最低5秒
 
     interval = max(1, total_duration // num_images)
     prompts = []
 
+    # 台本が空の場合のフォールバック
+    script_lines = script.lines if script.lines else []
+    num_script_lines = len(script_lines)
+
+    if num_script_lines == 0:
+        # 台本が空の場合、デフォルトプロンプトを生成
+        for i in range(num_images):
+            start_sec = i * interval
+            end_sec = (i + 1) * interval
+            start_time = f"{start_sec // 60}:{start_sec % 60:02d}"
+            end_time = f"{end_sec // 60}:{end_sec % 60:02d}"
+            prompt_text = "アニメ風イラスト、カラフル、高品質、シーン背景"
+            prompts.append(ImagePrompt(
+                number=i + 1,
+                start_time=start_time,
+                end_time=end_time,
+                prompt=prompt_text,
+            ))
+        return ImagePromptList(filename="auto_generated", prompts=prompts)
+
     # 各セリフからキーワードを抽出してプロンプトを生成
-    lines_per_image = max(1, len(script.lines) // num_images) if num_images > 0 else 1
+    lines_per_image = max(1, num_script_lines // num_images)
 
     for i in range(num_images):
         start_sec = i * interval
@@ -166,8 +195,8 @@ def generate_image_prompts_from_script(script, num_images: int):
         end_time = f"{end_sec // 60}:{end_sec % 60:02d}"
 
         # 対応するセリフからコンテキストを取得
-        line_idx = min(i * lines_per_image, len(script.lines) - 1)
-        context = script.lines[line_idx].text[:100]
+        line_idx = min(i * lines_per_image, num_script_lines - 1)
+        context = script_lines[line_idx].text[:100] if line_idx >= 0 else "シーン"
 
         # 日本語プロンプトを生成
         prompt_text = f"アニメ風イラスト、カラフル、高品質、シーン: {context}"
@@ -546,7 +575,11 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
             if detected_items == 0:
                 detected_items = script.total_lines
 
-            calculated_images = min(detected_items, 100)
+            # ゼロ除算防止: 最低1枚は生成
+            if detected_items <= 0:
+                detected_items = max(1, len(script.lines) if script.lines else 1)
+
+            calculated_images = max(1, min(detected_items, 100))
             st.info(f"🎨 {calculated_images}件の画像プロンプトを自動生成中（検出された項数: {detected_items}）...")
             try:
                 auto_prompts = generate_image_prompts_from_script(script, calculated_images)
@@ -726,6 +759,14 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
                         media_type="image",
                         file_path=generated_images[p.number],
                     ))
+
+            # 画像がない場合は動画生成をスキップ
+            if not generated_images:
+                st.error("❌ 画像が生成されていないため、動画を作成できません。")
+                st.info("💡 画像プロンプトファイルをアップロードするか、API設定を確認してください。")
+                progress.progress(1.0)
+                status.text("⚠️ 画像なしのため動画生成をスキップ")
+                return
 
             # 各フォーマットで動画出力
             video_dir = output_dir / "videos"
