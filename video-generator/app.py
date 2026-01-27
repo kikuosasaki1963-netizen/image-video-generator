@@ -634,17 +634,46 @@ def main_page() -> None:
 
         # 出力フォルダ設定
         with st.expander("📁 出力フォルダ設定", expanded=False):
+            import os
             settings = load_settings()
             default_output = settings.get("defaults", {}).get("output_folder", "output")
 
-            custom_output = st.text_input(
-                "出力フォルダパス",
-                value=st.session_state.get("custom_output_folder", default_output),
-                help="生成物の出力先フォルダを指定します。絶対パスまたは相対パスで指定できます。"
+            # ホームディレクトリとよく使うパスを取得
+            home_dir = os.path.expanduser("~")
+            preset_paths = {
+                "デフォルト (output)": "output",
+                "ホーム": home_dir,
+                "デスクトップ": os.path.join(home_dir, "Desktop"),
+                "ドキュメント": os.path.join(home_dir, "Documents"),
+                "ダウンロード": os.path.join(home_dir, "Downloads"),
+                "カスタム入力": "_custom_",
+            }
+
+            # プリセット選択
+            selected_preset = st.selectbox(
+                "出力先を選択",
+                options=list(preset_paths.keys()),
+                index=0,
+                key="output_preset_select",
             )
+
+            if selected_preset == "カスタム入力":
+                # カスタムパス入力
+                custom_output = st.text_input(
+                    "カスタムパスを入力",
+                    value=st.session_state.get("custom_output_folder", default_output),
+                    help="絶対パスまたは相対パスで指定できます。"
+                )
+            else:
+                custom_output = preset_paths[selected_preset]
+
             st.session_state.custom_output_folder = custom_output
 
             st.info(f"📂 現在の出力先: `{custom_output}/[タイムスタンプ]/`")
+
+            # フォルダが存在するか確認
+            if os.path.isabs(custom_output) and not os.path.exists(custom_output):
+                st.warning(f"⚠️ フォルダが存在しません。生成時に自動作成されます。")
 
         st.divider()
 
