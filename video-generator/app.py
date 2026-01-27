@@ -914,12 +914,28 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
                         ))
                         current_time += duration
 
-            # 画像エントリ追加
+            # 画像エントリ追加（音声の長さに合わせてスケーリング）
+            audio_total_duration = timeline.total_duration
+
+            if prompts.prompts:
+                last_prompt = prompts.prompts[-1]
+                prompt_total_duration = time_to_seconds(last_prompt.end_time)
+            else:
+                prompt_total_duration = audio_total_duration
+
+            if prompt_total_duration > 0:
+                time_scale = audio_total_duration / prompt_total_duration
+            else:
+                time_scale = 1.0
+
             for p in prompts.prompts:
                 if p.number in generated_images:
+                    scaled_start = time_to_seconds(p.start_time) * time_scale
+                    scaled_end = time_to_seconds(p.end_time) * time_scale
+
                     timeline.add_entry(TimelineEntry(
-                        start_time=time_to_seconds(p.start_time),
-                        end_time=time_to_seconds(p.end_time),
+                        start_time=scaled_start,
+                        end_time=scaled_end,
                         media_type="image",
                         file_path=generated_images[p.number],
                     ))
@@ -988,11 +1004,33 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
                         ))
                         current_time += duration
 
+            # 音声の実際の長さを取得
+            audio_total_duration = timeline.total_duration
+
+            # 画像プロンプトの元の総時間を計算
+            if prompts.prompts:
+                last_prompt = prompts.prompts[-1]
+                prompt_total_duration = time_to_seconds(last_prompt.end_time)
+            else:
+                prompt_total_duration = audio_total_duration
+
+            # スケール係数を計算（音声の長さ / プロンプトの総時間）
+            if prompt_total_duration > 0:
+                time_scale = audio_total_duration / prompt_total_duration
+            else:
+                time_scale = 1.0
+
+            st.info(f"📊 タイミング調整: 音声 {audio_total_duration:.1f}秒 / プロンプト {prompt_total_duration:.1f}秒 = スケール {time_scale:.2f}x")
+
             for p in prompts.prompts:
                 if p.number in generated_images:
+                    # 時間をスケーリングして音声に合わせる
+                    scaled_start = time_to_seconds(p.start_time) * time_scale
+                    scaled_end = time_to_seconds(p.end_time) * time_scale
+
                     timeline.add_entry(TimelineEntry(
-                        start_time=time_to_seconds(p.start_time),
-                        end_time=time_to_seconds(p.end_time),
+                        start_time=scaled_start,
+                        end_time=scaled_end,
                         media_type="image",
                         file_path=generated_images[p.number],
                     ))
