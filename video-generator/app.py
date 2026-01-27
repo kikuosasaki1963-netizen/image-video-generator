@@ -213,8 +213,13 @@ def generate_image_prompts_from_script(script, num_images: int):
 
 def get_output_dir() -> Path:
     """出力ディレクトリを取得"""
-    settings = load_settings()
-    output_folder = settings.get("defaults", {}).get("output_folder", "output")
+    # セッション状態からカスタム出力先を取得（あれば）
+    if "custom_output_folder" in st.session_state and st.session_state.custom_output_folder:
+        output_folder = st.session_state.custom_output_folder
+    else:
+        settings = load_settings()
+        output_folder = settings.get("defaults", {}).get("output_folder", "output")
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = Path(output_folder) / timestamp
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -223,8 +228,13 @@ def get_output_dir() -> Path:
 
 def get_existing_output_folders() -> list[str]:
     """既存の出力フォルダ一覧を取得"""
-    settings = load_settings()
-    output_folder = settings.get("defaults", {}).get("output_folder", "output")
+    # セッション状態からカスタム出力先を取得（あれば）
+    if "custom_output_folder" in st.session_state and st.session_state.custom_output_folder:
+        output_folder = st.session_state.custom_output_folder
+    else:
+        settings = load_settings()
+        output_folder = settings.get("defaults", {}).get("output_folder", "output")
+
     output_path = Path(output_folder)
 
     if not output_path.exists():
@@ -619,6 +629,22 @@ def main_page() -> None:
             # 出力形式が選択されていない場合の警告
             if not output_formats:
                 st.warning("⚠️ 出力形式を1つ以上選択してください")
+
+        st.divider()
+
+        # 出力フォルダ設定
+        with st.expander("📁 出力フォルダ設定", expanded=False):
+            settings = load_settings()
+            default_output = settings.get("defaults", {}).get("output_folder", "output")
+
+            custom_output = st.text_input(
+                "出力フォルダパス",
+                value=st.session_state.get("custom_output_folder", default_output),
+                help="生成物の出力先フォルダを指定します。絶対パスまたは相対パスで指定できます。"
+            )
+            st.session_state.custom_output_folder = custom_output
+
+            st.info(f"📂 現在の出力先: `{custom_output}/[タイムスタンプ]/`")
 
         st.divider()
 
