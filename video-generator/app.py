@@ -824,6 +824,56 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
 
         progress.progress(0.5)
 
+        # ステップ2.5: 背景動画のダウンロード
+        background_videos = {}
+        status.text("🎥 背景動画を検索中...")
+
+        try:
+            stock_client = StockVideoClient()
+            video_dir = output_dir / "videos" / "backgrounds"
+            video_dir.mkdir(parents=True, exist_ok=True)
+
+            for i, p in enumerate(prompts.prompts):
+                if p.number in generated_images:
+                    try:
+                        status.text(f"🎥 背景動画検索中: {i + 1}/{len(prompts.prompts)}")
+
+                        # プロンプトからキーワードを抽出して検索
+                        keywords = p.prompt.split()[:3]
+                        search_query = " ".join(keywords) if keywords else "abstract background"
+
+                        # Pexelsで動画を検索
+                        videos = stock_client.search_pexels(search_query, per_page=1)
+
+                        if videos:
+                            video_path = video_dir / f"{p.number:03d}_bg.mp4"
+                            stock_client.download(videos[0], video_path)
+                            background_videos[p.number] = str(video_path)
+                            st.success(f"✅ 背景動画 {p.number} ダウンロード完了")
+                        else:
+                            # Pixabayにフォールバック
+                            videos = stock_client.search_pixabay(search_query, per_page=1)
+                            if videos:
+                                video_path = video_dir / f"{p.number:03d}_bg.mp4"
+                                stock_client.download(videos[0], video_path)
+                                background_videos[p.number] = str(video_path)
+                                st.success(f"✅ 背景動画 {p.number} ダウンロード完了 (Pixabay)")
+
+                    except Exception as vid_err:
+                        st.warning(f"⚠️ 背景動画取得エラー（画像 {p.number}）: {vid_err}")
+
+                progress.progress(0.5 + (i + 1) / (len(prompts.prompts) * 8))
+
+            if background_videos:
+                st.success(f"✅ 背景動画: {len(background_videos)}件ダウンロード完了")
+            else:
+                st.info("ℹ️ 背景動画なしで続行します（画像のみ表示）")
+
+        except Exception as e:
+            st.warning(f"⚠️ 背景動画の取得中にエラー: {e}")
+
+        progress.progress(0.6)
+
         # ステップ3: BGM生成
         bgm_path = None
 
@@ -1028,6 +1078,16 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
                     scaled_start = time_to_seconds(p.start_time) * time_scale
                     scaled_end = time_to_seconds(p.end_time) * time_scale
 
+                    # 背景動画があれば追加
+                    if p.number in background_videos:
+                        timeline.add_entry(TimelineEntry(
+                            start_time=scaled_start,
+                            end_time=scaled_end,
+                            media_type="video",
+                            file_path=background_videos[p.number],
+                        ))
+
+                    # 画像を追加（背景動画の上にオーバーレイ）
                     timeline.add_entry(TimelineEntry(
                         start_time=scaled_start,
                         end_time=scaled_end,

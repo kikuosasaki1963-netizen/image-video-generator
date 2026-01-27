@@ -8,10 +8,13 @@ from pathlib import Path
 
 from moviepy import (
     AudioFileClip,
+    ColorClip,
     CompositeAudioClip,
     CompositeVideoClip,
     ImageClip,
+    VideoFileClip,
     concatenate_audioclips,
+    concatenate_videoclips,
 )
 
 from src.utils.config import load_settings
@@ -111,17 +114,60 @@ class VideoEditor:
                 clip = clip.with_start(entry.start_time)
                 audio_clips.append(clip)
 
-        # 画像クリップを作成
+        # 背景動画クリップを作成
+        video_clips = []
+        for entry in timeline.entries:
+            if entry.media_type == "video":
+                try:
+                    duration = entry.end_time - entry.start_time
+                    clip = VideoFileClip(entry.file_path)
+
+                    # 動画が短い場合はループ
+                    if clip.duration < duration:
+                        loops_needed = int(duration / clip.duration) + 1
+                        clip = concatenate_videoclips([clip] * loops_needed)
+
+                    clip = (
+                        clip.subclipped(0, duration)
+                        .resized((width, height))
+                        .with_start(entry.start_time)
+                    )
+                    video_clips.append(clip)
+                except Exception as e:
+                    print(f"背景動画読み込みエラー（スキップ）: {e}")
+
+        # 画像クリップを作成（背景動画がある場合は中央に配置）
         image_clips = []
         for entry in timeline.entries:
             if entry.media_type == "image":
                 duration = entry.end_time - entry.start_time
-                clip = (
-                    ImageClip(entry.file_path)
-                    .with_duration(duration)
-                    .with_start(entry.start_time)
-                    .resized((width, height))
+
+                # 対応する時間帯に背景動画があるかチェック
+                has_bg_video = any(
+                    v_entry.start_time <= entry.start_time < v_entry.end_time
+                    for v_entry in timeline.entries
+                    if v_entry.media_type == "video"
                 )
+
+                if has_bg_video:
+                    # 背景動画がある場合：画像を80%サイズで中央に配置
+                    img_width = int(width * 0.8)
+                    img_height = int(height * 0.8)
+                    clip = (
+                        ImageClip(entry.file_path)
+                        .with_duration(duration)
+                        .with_start(entry.start_time)
+                        .resized((img_width, img_height))
+                        .with_position("center")
+                    )
+                else:
+                    # 背景動画がない場合：フルサイズ
+                    clip = (
+                        ImageClip(entry.file_path)
+                        .with_duration(duration)
+                        .with_start(entry.start_time)
+                        .resized((width, height))
+                    )
                 image_clips.append(clip)
 
         # BGMを追加（ファイルが存在する場合のみ）
@@ -140,8 +186,20 @@ class VideoEditor:
                 # BGM読み込みエラーはスキップ（動画生成は続行）
                 print(f"BGM読み込みエラー（スキップ）: {e}")
 
-        # 合成
-        video = CompositeVideoClip(image_clips, size=(width, height))
+        # 合成（背景動画 + 画像のレイヤー構成）
+        all_video_clips = []
+
+        # 背景として黒いベースを追加
+        base_clip = ColorClip(size=(width, height), color=(0, 0, 0)).with_duration(timeline.total_duration)
+        all_video_clips.append(base_clip)
+
+        # 背景動画を追加
+        all_video_clips.extend(video_clips)
+
+        # 画像を前面に追加
+        all_video_clips.extend(image_clips)
+
+        video = CompositeVideoClip(all_video_clips, size=(width, height))
         if audio_clips:
             audio = CompositeAudioClip(audio_clips)
             video = video.with_audio(audio)
@@ -162,7 +220,10 @@ class VideoEditor:
         video.close()
         for clip in audio_clips:
             clip.close()
+        for clip in video_clips:
+            clip.close()
         for clip in image_clips:
             clip.close()
+        base_clip.close()
 
         return output_path
