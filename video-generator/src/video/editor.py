@@ -186,7 +186,81 @@ class VideoEditor:
                 # BGM読み込みエラーはスキップ（動画生成は続行）
                 print(f"BGM読み込みエラー（スキップ）: {e}")
 
-        # 合成（背景動画 + 画像のレイヤー構成）
+        # 解説者アバタークリップを作成
+        avatar_clips = []
+        speakers_config = self._settings.get("speakers", {})
+        sp1_avatar = speakers_config.get("speaker1", {}).get("avatar_path", "")
+        sp2_avatar = speakers_config.get("speaker2", {}).get("avatar_path", "")
+
+        # アバターサイズ（画面の15%程度）
+        avatar_size = int(min(width, height) * 0.15)
+
+        # 話者ごとの時間帯を取得
+        speaker_segments = []
+        for entry in timeline.entries:
+            if entry.media_type == "audio" and entry.speaker:
+                speaker_segments.append({
+                    "start": entry.start_time,
+                    "end": entry.end_time,
+                    "speaker": entry.speaker,
+                })
+
+        # アバターが設定されている場合のみ追加
+        if sp1_avatar and Path(sp1_avatar).exists():
+            # Speaker1 (左下) - 各セグメントで不透明度を変える
+            for seg in speaker_segments:
+                is_speaking = seg["speaker"] == "speaker1"
+                opacity = 1.0 if is_speaking else 0.4
+
+                clip = (
+                    ImageClip(sp1_avatar)
+                    .with_duration(seg["end"] - seg["start"])
+                    .with_start(seg["start"])
+                    .resized((avatar_size, avatar_size))
+                    .with_position((20, height - avatar_size - 20))
+                )
+                clip = clip.with_opacity(opacity)
+                avatar_clips.append(clip)
+
+            # セグメントがない場合は全体に表示
+            if not speaker_segments:
+                clip = (
+                    ImageClip(sp1_avatar)
+                    .with_duration(timeline.total_duration)
+                    .resized((avatar_size, avatar_size))
+                    .with_position((20, height - avatar_size - 20))
+                )
+                clip = clip.with_opacity(0.7)
+                avatar_clips.append(clip)
+
+        if sp2_avatar and Path(sp2_avatar).exists():
+            # Speaker2 (右下) - 各セグメントで不透明度を変える
+            for seg in speaker_segments:
+                is_speaking = seg["speaker"] == "speaker2"
+                opacity = 1.0 if is_speaking else 0.4
+
+                clip = (
+                    ImageClip(sp2_avatar)
+                    .with_duration(seg["end"] - seg["start"])
+                    .with_start(seg["start"])
+                    .resized((avatar_size, avatar_size))
+                    .with_position((width - avatar_size - 20, height - avatar_size - 20))
+                )
+                clip = clip.with_opacity(opacity)
+                avatar_clips.append(clip)
+
+            # セグメントがない場合は全体に表示
+            if not speaker_segments:
+                clip = (
+                    ImageClip(sp2_avatar)
+                    .with_duration(timeline.total_duration)
+                    .resized((avatar_size, avatar_size))
+                    .with_position((width - avatar_size - 20, height - avatar_size - 20))
+                )
+                clip = clip.with_opacity(0.7)
+                avatar_clips.append(clip)
+
+        # 合成（背景動画 + 画像 + アバターのレイヤー構成）
         all_video_clips = []
 
         # 背景として黒いベースを追加
@@ -198,6 +272,9 @@ class VideoEditor:
 
         # 画像を前面に追加
         all_video_clips.extend(image_clips)
+
+        # 解説者アバターを最前面に追加
+        all_video_clips.extend(avatar_clips)
 
         video = CompositeVideoClip(all_video_clips, size=(width, height))
         if audio_clips:
@@ -223,6 +300,8 @@ class VideoEditor:
         for clip in video_clips:
             clip.close()
         for clip in image_clips:
+            clip.close()
+        for clip in avatar_clips:
             clip.close()
         base_clip.close()
 

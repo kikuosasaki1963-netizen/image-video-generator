@@ -1152,7 +1152,7 @@ def settings_page() -> None:
     settings = load_settings()
 
     # タブで設定カテゴリを分割
-    tab1, tab2, tab3 = st.tabs(["🎤 話者設定", "🔑 APIキー設定", "📁 デフォルト設定"])
+    tab1, tab2, tab3, tab4 = st.tabs(["🎤 話者設定", "🔑 APIキー設定", "📁 デフォルト設定", "👤 解説者イラスト"])
 
     with tab1:
         st.header("話者設定")
@@ -1239,6 +1239,70 @@ def settings_page() -> None:
         st.subheader("出力フォルダ")
         output_folder = st.text_input("出力フォルダパス", value=defaults.get("output_folder", "output"))
 
+    with tab4:
+        st.header("解説者イラスト設定")
+        st.markdown("動画の左下・右下に表示する解説者キャラクターのイラストを設定します。")
+
+        # 解説者イラストの保存ディレクトリ
+        avatar_dir = Path("assets/avatars")
+        avatar_dir.mkdir(parents=True, exist_ok=True)
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.subheader("🔵 Speaker 1 (アリイエ)")
+            speaker1_avatar = settings.get("speakers", {}).get("speaker1", {}).get("avatar_path", "")
+
+            # 現在のイラストを表示
+            if speaker1_avatar and Path(speaker1_avatar).exists():
+                st.image(speaker1_avatar, width=150, caption="現在のイラスト")
+            else:
+                st.info("イラスト未設定")
+
+            # アップロード
+            sp1_upload = st.file_uploader(
+                "イラストをアップロード（PNG推奨）",
+                type=["png", "jpg", "jpeg", "webp"],
+                key="sp1_avatar_upload",
+            )
+            if sp1_upload:
+                sp1_avatar_path = avatar_dir / f"speaker1.{sp1_upload.name.split('.')[-1]}"
+                with open(sp1_avatar_path, "wb") as f:
+                    f.write(sp1_upload.getvalue())
+                st.success(f"✅ アップロード完了: {sp1_avatar_path.name}")
+                st.image(str(sp1_avatar_path), width=150)
+
+        with col2:
+            st.subheader("🟠 Speaker 2 (ミオン)")
+            speaker2_avatar = settings.get("speakers", {}).get("speaker2", {}).get("avatar_path", "")
+
+            # 現在のイラストを表示
+            if speaker2_avatar and Path(speaker2_avatar).exists():
+                st.image(speaker2_avatar, width=150, caption="現在のイラスト")
+            else:
+                st.info("イラスト未設定")
+
+            # アップロード
+            sp2_upload = st.file_uploader(
+                "イラストをアップロード（PNG推奨）",
+                type=["png", "jpg", "jpeg", "webp"],
+                key="sp2_avatar_upload",
+            )
+            if sp2_upload:
+                sp2_avatar_path = avatar_dir / f"speaker2.{sp2_upload.name.split('.')[-1]}"
+                with open(sp2_avatar_path, "wb") as f:
+                    f.write(sp2_upload.getvalue())
+                st.success(f"✅ アップロード完了: {sp2_avatar_path.name}")
+                st.image(str(sp2_avatar_path), width=150)
+
+        st.divider()
+        st.markdown("""
+        **表示仕様:**
+        - 両方のキャラクターが常に表示されます
+        - 話している方がハイライト（明るく）表示されます
+        - 話していない方は半透明で表示されます
+        """)
+
     # 保存ボタン
     st.divider()
     if st.button("💾 設定を保存", type="primary"):
@@ -1257,6 +1321,15 @@ def settings_page() -> None:
         settings["speakers"]["speaker1"]["voice_name"] = voice_map.get(sp1_voice, "ja-JP-Neural2-B")
         settings["speakers"]["speaker2"]["display_name"] = sp2_name
         settings["speakers"]["speaker2"]["voice_name"] = voice_map.get(sp2_voice, "ja-JP-Neural2-C")
+
+        # アバターパスを保存
+        avatar_dir = Path("assets/avatars")
+        for sp_key, sp_num in [("speaker1", 1), ("speaker2", 2)]:
+            for ext in ["png", "jpg", "jpeg", "webp"]:
+                avatar_path = avatar_dir / f"speaker{sp_num}.{ext}"
+                if avatar_path.exists():
+                    settings["speakers"][sp_key]["avatar_path"] = str(avatar_path)
+                    break
 
         if "defaults" not in settings:
             settings["defaults"] = {"bgm": {}}
