@@ -1214,12 +1214,17 @@ def settings_page() -> None:
 
         speakers = settings.get("speakers", {})
 
+        st.info("💡 台本で `speaker1:` と `speaker2:` で使い分けます。表示名はキャラクター名として自由に設定できます。")
+
         col1, col2 = st.columns(2)
 
+        sp1 = speakers.get("speaker1", {})
+        sp2 = speakers.get("speaker2", {})
+
         with col1:
-            st.subheader("Speaker 1")
-            sp1 = speakers.get("speaker1", {})
-            sp1_name = st.text_input("表示名", value=sp1.get("display_name", "ナレーター1"), key="sp1_name")
+            sp1_current_name = sp1.get("display_name", "ナレーター1")
+            st.subheader(f"🔵 speaker1 → {sp1_current_name}")
+            sp1_name = st.text_input("キャラクター名", value=sp1_current_name, key="sp1_name")
             sp1_voice = st.selectbox(
                 "音声",
                 ["ja-JP-Neural2-B (女性)", "ja-JP-Neural2-C (男性)", "ja-JP-Neural2-D (男性)", "ja-JP-Wavenet-A (女性)"],
@@ -1228,9 +1233,9 @@ def settings_page() -> None:
             )
 
         with col2:
-            st.subheader("Speaker 2")
-            sp2 = speakers.get("speaker2", {})
-            sp2_name = st.text_input("表示名", value=sp2.get("display_name", "ナレーター2"), key="sp2_name")
+            sp2_current_name = sp2.get("display_name", "ナレーター2")
+            st.subheader(f"🟠 speaker2 → {sp2_current_name}")
+            sp2_name = st.text_input("キャラクター名", value=sp2_current_name, key="sp2_name")
             sp2_voice = st.selectbox(
                 "音声",
                 ["ja-JP-Neural2-B (女性)", "ja-JP-Neural2-C (男性)", "ja-JP-Neural2-D (男性)", "ja-JP-Wavenet-A (女性)"],
@@ -1292,31 +1297,76 @@ def settings_page() -> None:
         )
 
         st.subheader("出力フォルダ")
-        output_folder = st.text_input("出力フォルダパス", value=defaults.get("output_folder", "output"))
+        st.info("💡 このPCで使用するデフォルトの出力先を選択してください。")
+
+        # ユーザーのホームディレクトリを取得
+        home_dir = os.path.expanduser("~")
+
+        # プリセットオプション
+        preset_paths = {
+            "デフォルト (output)": "output",
+            "ホーム": home_dir,
+            "デスクトップ": os.path.join(home_dir, "Desktop"),
+            "ドキュメント": os.path.join(home_dir, "Documents"),
+            "ダウンロード": os.path.join(home_dir, "Downloads"),
+            "カスタム入力": "_custom_",
+        }
+
+        # 現在の設定値からプリセットを判定
+        current_folder = defaults.get("output_folder", "output")
+        current_preset = "カスタム入力"
+        for name, path in preset_paths.items():
+            if path == current_folder:
+                current_preset = name
+                break
+
+        preset_options = list(preset_paths.keys())
+        selected_preset = st.selectbox(
+            "出力先を選択",
+            options=preset_options,
+            index=preset_options.index(current_preset) if current_preset in preset_options else 0,
+            key="settings_output_preset",
+        )
+
+        if selected_preset == "カスタム入力":
+            output_folder = st.text_input(
+                "カスタムパスを入力",
+                value=current_folder if current_folder not in preset_paths.values() else "",
+                key="settings_custom_output",
+            )
+        else:
+            output_folder = preset_paths[selected_preset]
+            st.text(f"📁 {output_folder}")
 
     with tab4:
         st.header("解説者イラスト設定")
         st.markdown("動画の左下・右下に表示する解説者キャラクターのイラストを設定します。")
+        st.info("💡 台本の `speaker1:` `speaker2:` に対応するキャラクターのイラストを設定してください。")
 
         # 解説者イラストの保存ディレクトリ
         avatar_dir = Path("assets/avatars")
         avatar_dir.mkdir(parents=True, exist_ok=True)
 
+        # 表示名を取得
+        sp1_display = settings.get("speakers", {}).get("speaker1", {}).get("display_name", "未設定")
+        sp2_display = settings.get("speakers", {}).get("speaker2", {}).get("display_name", "未設定")
+
         col1, col2 = st.columns(2)
 
         with col1:
-            st.subheader("🔵 Speaker 1 (アリイエ)")
+            st.subheader("🔵 speaker1（左下に表示）")
+            st.caption(f"キャラクター名: **{sp1_display}**")
             speaker1_avatar = settings.get("speakers", {}).get("speaker1", {}).get("avatar_path", "")
 
             # 現在のイラストを表示
             if speaker1_avatar and Path(speaker1_avatar).exists():
-                st.image(speaker1_avatar, width=150, caption="現在のイラスト")
+                st.image(speaker1_avatar, width=150, caption=f"{sp1_display} のイラスト")
             else:
                 st.info("イラスト未設定")
 
             # アップロード
             sp1_upload = st.file_uploader(
-                "イラストをアップロード（PNG推奨）",
+                f"{sp1_display} のイラストをアップロード（PNG推奨）",
                 type=["png", "jpg", "jpeg", "webp"],
                 key="sp1_avatar_upload",
             )
@@ -1328,18 +1378,19 @@ def settings_page() -> None:
                 st.image(str(sp1_avatar_path), width=150)
 
         with col2:
-            st.subheader("🟠 Speaker 2 (ミオン)")
+            st.subheader("🟠 speaker2（右下に表示）")
+            st.caption(f"キャラクター名: **{sp2_display}**")
             speaker2_avatar = settings.get("speakers", {}).get("speaker2", {}).get("avatar_path", "")
 
             # 現在のイラストを表示
             if speaker2_avatar and Path(speaker2_avatar).exists():
-                st.image(speaker2_avatar, width=150, caption="現在のイラスト")
+                st.image(speaker2_avatar, width=150, caption=f"{sp2_display} のイラスト")
             else:
                 st.info("イラスト未設定")
 
             # アップロード
             sp2_upload = st.file_uploader(
-                "イラストをアップロード（PNG推奨）",
+                f"{sp2_display} のイラストをアップロード（PNG推奨）",
                 type=["png", "jpg", "jpeg", "webp"],
                 key="sp2_avatar_upload",
             )
@@ -1356,6 +1407,8 @@ def settings_page() -> None:
         - 両方のキャラクターが常に表示されます
         - 話している方がハイライト（明るく）表示されます
         - 話していない方は半透明で表示されます
+
+        💡 キャラクター名は「話者設定」タブで変更できます。
         """)
 
     # 保存ボタン
