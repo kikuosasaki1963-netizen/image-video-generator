@@ -359,7 +359,9 @@ def create_history_entry(output_dir: str, status: str = "in_progress") -> dict:
         },
         "files": {
             "script": None,
+            "script_file": None,  # 台本ファイルパス
             "prompts": None,
+            "prompts_file": None,  # プロンプトファイルパス
             "audio_files": {},
             "images": {},
             "bgm": None,
@@ -370,6 +372,121 @@ def create_history_entry(output_dir: str, status: str = "in_progress") -> dict:
             "output_formats": [],
         },
     }
+
+
+def save_script_to_output(script, output_dir: Path) -> Path | None:
+    """台本を出力フォルダに保存"""
+    try:
+        script_path = output_dir / "script_backup.json"
+        script_data = {
+            "filename": script.filename,
+            "lines": [
+                {
+                    "number": line.number,
+                    "speaker": line.speaker,
+                    "text": line.text,
+                    "scene_description": line.scene_description,
+                    "original_text": getattr(line, "original_text", line.text),
+                }
+                for line in script.lines
+            ],
+            "total_lines": script.total_lines,
+        }
+        with open(script_path, "w", encoding="utf-8") as f:
+            json.dump(script_data, f, ensure_ascii=False, indent=2)
+        return script_path
+    except Exception as e:
+        print(f"台本保存エラー: {e}")
+        return None
+
+
+def load_script_from_output(output_dir: Path):
+    """出力フォルダから台本を読み込み"""
+    from src.parser.script import Script, Line
+
+    script_path = output_dir / "script_backup.json"
+    if not script_path.exists():
+        return None
+
+    try:
+        with open(script_path, encoding="utf-8") as f:
+            data = json.load(f)
+
+        lines = []
+        for line_data in data.get("lines", []):
+            line = Line(
+                number=line_data["number"],
+                speaker=line_data["speaker"],
+                text=line_data["text"],
+                original_text=line_data.get("original_text", line_data["text"]),
+                scene_description=line_data.get("scene_description"),
+            )
+            lines.append(line)
+
+        script = Script(
+            filename=data.get("filename", "restored"),
+            lines=lines,
+        )
+        return script
+    except Exception as e:
+        print(f"台本読み込みエラー: {e}")
+        return None
+
+
+def save_prompts_to_output(prompts, output_dir: Path) -> Path | None:
+    """プロンプトを出力フォルダに保存"""
+    try:
+        prompts_path = output_dir / "prompts_backup.json"
+        prompts_data = {
+            "filename": prompts.filename,
+            "prompts": [
+                {
+                    "number": p.number,
+                    "start_time": p.start_time,
+                    "end_time": p.end_time,
+                    "prompt": p.prompt,
+                }
+                for p in prompts.prompts
+            ],
+            "total_images": prompts.total_images,
+        }
+        with open(prompts_path, "w", encoding="utf-8") as f:
+            json.dump(prompts_data, f, ensure_ascii=False, indent=2)
+        return prompts_path
+    except Exception as e:
+        print(f"プロンプト保存エラー: {e}")
+        return None
+
+
+def load_prompts_from_output(output_dir: Path):
+    """出力フォルダからプロンプトを読み込み"""
+    from src.image.generator import ImagePrompt, ImagePromptList
+
+    prompts_path = output_dir / "prompts_backup.json"
+    if not prompts_path.exists():
+        return None
+
+    try:
+        with open(prompts_path, encoding="utf-8") as f:
+            data = json.load(f)
+
+        prompts = [
+            ImagePrompt(
+                number=p["number"],
+                start_time=p["start_time"],
+                end_time=p["end_time"],
+                prompt=p["prompt"],
+            )
+            for p in data.get("prompts", [])
+        ]
+
+        return ImagePromptList(
+            filename=data.get("filename", "restored"),
+            prompts=prompts,
+        )
+    except Exception as e:
+        print(f"プロンプト読み込みエラー: {e}")
+        return None
 
 
 def update_history_entry(entry_id: str, updates: dict) -> None:
@@ -507,22 +624,51 @@ def main_page() -> None:
                         st.caption(" ".join(steps_text) if steps_text else "未開始")
                     with col3:
                         if st.button("▶️ 再開", key=f"resume_{entry['id']}"):
-                            st.session_state.resume_mode = {
-                                "enabled": True,
-                                "entry": entry,
-                            }
-                            folder_name = Path(entry.get("output_dir", "")).name
-                            if folder_name:
-                                materials = load_existing_materials(folder_name)
-                                st.session_state.reuse_mode = {
+                            output_dir_path = Path(entry.get("output_dir", ""))
+                            folder_name = output_dir_path.name
+
+                            # 台本とプロンプトを復元
+                            restored_script = load_script_from_output(output_dir_path)
+                            restored_prompts = load_prompts_from_output(output_dir_path)
+
+                            if restored_script:
+                                st.session_state.script = restored_script
+                                st.session_state.resume_mode = {
                                     "enabled": True,
-                                    "folder": folder_name,
-                                    "audio_files": materials["audio_files"],
-                                    "images": materials["images"],
-                                    "bgm": materials["bgm"],
+                                    "entry": entry,
                                 }
-                            st.success(f"✅ {entry['id']} を再開します")
-                            st.rerun()
+
+                                if restored_prompts:
+                                    st.session_state.prompts = restored_prompts
+
+                                if folder_name:
+                                    materials = load_existing_materials(folder_name)
+                                    st.session_state.reuse_mode = {
+                                        "enabled": True,
+                                        "folder": folder_name,
+                                        "audio_files": materials["audio_files"],
+                                        "images": materials["images"],
+                                        "bgm": materials["bgm"],
+                                    }
+
+                                # 出力ディレクトリを設定
+                                st.session_state.output_dir = output_dir_path
+
+                                st.success(f"✅ {entry['id']} を再開します。台本と素材を復元しました。")
+                                st.rerun()
+                            else:
+                                st.error("❌ 台本ファイルが見つかりません。台本を再度アップロードしてください。")
+                                # 素材だけでも読み込む
+                                if folder_name:
+                                    materials = load_existing_materials(folder_name)
+                                    st.session_state.reuse_mode = {
+                                        "enabled": True,
+                                        "folder": folder_name,
+                                        "audio_files": materials["audio_files"],
+                                        "images": materials["images"],
+                                        "bgm": materials["bgm"],
+                                    }
+                                    st.info(f"♻️ 素材は読み込みました: 音声{len(materials['audio_files'])}件、画像{len(materials['images'])}枚")
                     with col4:
                         if st.button("🗑️", key=f"del_int_{entry['id']}", help="この履歴を削除"):
                             delete_history_entry(entry["id"])
@@ -992,9 +1138,21 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
                 add_history_entry(history_entry)
             return
 
-        # 台本パース完了
+        # 台本パース完了 - 台本とプロンプトを保存
         if history_entry:
             history_entry["progress"]["script_parsed"] = True
+
+            # 台本を保存（再開時に復元できるように）
+            script_file = save_script_to_output(script, output_dir)
+            if script_file:
+                history_entry["files"]["script_file"] = str(script_file)
+
+            # プロンプトも保存
+            if prompts:
+                prompts_file = save_prompts_to_output(prompts, output_dir)
+                if prompts_file:
+                    history_entry["files"]["prompts_file"] = str(prompts_file)
+
             add_history_entry(history_entry)
 
         # ステップ1: 音声生成（まだ生成していない場合）
@@ -1795,7 +1953,7 @@ def main() -> None:
         )
 
         st.divider()
-        st.markdown("**バージョン:** 0.1.9")
+        st.markdown("**バージョン:** 0.2.0")
         st.markdown("[📖 ドキュメント](docs/requirements.md)")
 
     # ページルーティング
