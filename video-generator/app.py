@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import shutil
@@ -28,6 +29,60 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+
+def restore_avatars_from_settings() -> None:
+    """設定ファイルからアバター画像を復元（起動時に実行）"""
+    settings = load_settings()
+    avatar_dir = Path("assets/avatars")
+    avatar_dir.mkdir(parents=True, exist_ok=True)
+
+    for speaker_key in ["speaker1", "speaker2"]:
+        speaker_settings = settings.get("speakers", {}).get(speaker_key, {})
+        avatar_base64 = speaker_settings.get("avatar_base64")
+        avatar_ext = speaker_settings.get("avatar_ext", "png")
+
+        if avatar_base64:
+            try:
+                # Base64からデコード
+                image_data = base64.b64decode(avatar_base64)
+                avatar_path = avatar_dir / f"{speaker_key}.{avatar_ext}"
+
+                # ファイルが存在しない場合のみ復元
+                if not avatar_path.exists():
+                    with open(avatar_path, "wb") as f:
+                        f.write(image_data)
+
+                    # パスも更新
+                    if "speakers" not in settings:
+                        settings["speakers"] = {}
+                    if speaker_key not in settings["speakers"]:
+                        settings["speakers"][speaker_key] = {}
+                    settings["speakers"][speaker_key]["avatar_path"] = str(avatar_path)
+
+            except Exception as e:
+                print(f"アバター復元エラー ({speaker_key}): {e}")
+
+
+def save_avatar_to_settings(speaker_key: str, image_data: bytes, ext: str) -> None:
+    """アバター画像をBase64で設定に保存"""
+    settings = load_settings()
+
+    if "speakers" not in settings:
+        settings["speakers"] = {}
+    if speaker_key not in settings["speakers"]:
+        settings["speakers"][speaker_key] = {}
+
+    # Base64エンコード
+    avatar_base64 = base64.b64encode(image_data).decode("utf-8")
+    settings["speakers"][speaker_key]["avatar_base64"] = avatar_base64
+    settings["speakers"][speaker_key]["avatar_ext"] = ext
+
+    save_settings(settings)
+
+
+# 起動時にアバターを復元
+restore_avatars_from_settings()
 
 
 def time_to_seconds(time_str: str) -> float:
@@ -1881,11 +1936,18 @@ def settings_page() -> None:
         with col1:
             st.subheader("🔵 speaker1（左下に表示）")
             st.caption(f"キャラクター名: **{sp1_display}**")
-            speaker1_avatar = settings.get("speakers", {}).get("speaker1", {}).get("avatar_path", "")
+            speaker1_settings = settings.get("speakers", {}).get("speaker1", {})
+            speaker1_avatar = speaker1_settings.get("avatar_path", "")
+            speaker1_base64 = speaker1_settings.get("avatar_base64", "")
 
             # 現在のイラストを表示
             if speaker1_avatar and Path(speaker1_avatar).exists():
                 st.image(speaker1_avatar, width=150, caption=f"{sp1_display} のイラスト")
+                st.caption("✅ 設定に保存済み" if speaker1_base64 else "⚠️ 未保存（再アップロード推奨）")
+            elif speaker1_base64:
+                # Base64から表示（ファイルが消えている場合）
+                st.image(base64.b64decode(speaker1_base64), width=150, caption=f"{sp1_display} のイラスト（復元済み）")
+                st.caption("✅ 設定から復元")
             else:
                 st.info("イラスト未設定")
 
@@ -1896,20 +1958,35 @@ def settings_page() -> None:
                 key="sp1_avatar_upload",
             )
             if sp1_upload:
-                sp1_avatar_path = avatar_dir / f"speaker1.{sp1_upload.name.split('.')[-1]}"
+                ext = sp1_upload.name.split('.')[-1].lower()
+                image_data = sp1_upload.getvalue()
+                sp1_avatar_path = avatar_dir / f"speaker1.{ext}"
+
+                # ファイルを保存
                 with open(sp1_avatar_path, "wb") as f:
-                    f.write(sp1_upload.getvalue())
-                st.success(f"✅ アップロード完了: {sp1_avatar_path.name}")
+                    f.write(image_data)
+
+                # Base64で設定に保存（永続化）
+                save_avatar_to_settings("speaker1", image_data, ext)
+
+                st.success(f"✅ アップロード完了: {sp1_avatar_path.name}（設定に保存済み）")
                 st.image(str(sp1_avatar_path), width=150)
 
         with col2:
             st.subheader("🟠 speaker2（右下に表示）")
             st.caption(f"キャラクター名: **{sp2_display}**")
-            speaker2_avatar = settings.get("speakers", {}).get("speaker2", {}).get("avatar_path", "")
+            speaker2_settings = settings.get("speakers", {}).get("speaker2", {})
+            speaker2_avatar = speaker2_settings.get("avatar_path", "")
+            speaker2_base64 = speaker2_settings.get("avatar_base64", "")
 
             # 現在のイラストを表示
             if speaker2_avatar and Path(speaker2_avatar).exists():
                 st.image(speaker2_avatar, width=150, caption=f"{sp2_display} のイラスト")
+                st.caption("✅ 設定に保存済み" if speaker2_base64 else "⚠️ 未保存（再アップロード推奨）")
+            elif speaker2_base64:
+                # Base64から表示（ファイルが消えている場合）
+                st.image(base64.b64decode(speaker2_base64), width=150, caption=f"{sp2_display} のイラスト（復元済み）")
+                st.caption("✅ 設定から復元")
             else:
                 st.info("イラスト未設定")
 
@@ -1920,10 +1997,18 @@ def settings_page() -> None:
                 key="sp2_avatar_upload",
             )
             if sp2_upload:
-                sp2_avatar_path = avatar_dir / f"speaker2.{sp2_upload.name.split('.')[-1]}"
+                ext = sp2_upload.name.split('.')[-1].lower()
+                image_data = sp2_upload.getvalue()
+                sp2_avatar_path = avatar_dir / f"speaker2.{ext}"
+
+                # ファイルを保存
                 with open(sp2_avatar_path, "wb") as f:
-                    f.write(sp2_upload.getvalue())
-                st.success(f"✅ アップロード完了: {sp2_avatar_path.name}")
+                    f.write(image_data)
+
+                # Base64で設定に保存（永続化）
+                save_avatar_to_settings("speaker2", image_data, ext)
+
+                st.success(f"✅ アップロード完了: {sp2_avatar_path.name}（設定に保存済み）")
                 st.image(str(sp2_avatar_path), width=150)
 
         st.divider()
@@ -1992,7 +2077,7 @@ def main() -> None:
         )
 
         st.divider()
-        st.markdown("**バージョン:** 0.2.1")
+        st.markdown("**バージョン:** 0.2.2")
         st.markdown("[📖 ドキュメント](docs/requirements.md)")
 
     # ページルーティング
