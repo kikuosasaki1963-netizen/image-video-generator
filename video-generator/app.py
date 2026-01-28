@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
+import traceback
 import zipfile
 from datetime import datetime
 from io import BytesIO
@@ -313,6 +315,101 @@ def load_existing_materials(folder_name: str) -> dict:
     return result
 
 
+def get_history_file_path() -> Path:
+    """履歴ファイルのパスを取得"""
+    settings = load_settings()
+    output_folder = settings.get("defaults", {}).get("output_folder", "output")
+    return Path(output_folder) / "generation_history.json"
+
+
+def load_generation_history() -> list[dict]:
+    """生成履歴を読み込む"""
+    history_file = get_history_file_path()
+    if history_file.exists():
+        try:
+            with open(history_file, encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return []
+    return []
+
+
+def save_generation_history(history: list[dict]) -> None:
+    """生成履歴を保存"""
+    history_file = get_history_file_path()
+    history_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(history_file, "w", encoding="utf-8") as f:
+        json.dump(history, f, ensure_ascii=False, indent=2)
+
+
+def create_history_entry(output_dir: str, status: str = "in_progress") -> dict:
+    """履歴エントリを作成"""
+    return {
+        "id": datetime.now().strftime("%Y%m%d_%H%M%S"),
+        "output_dir": output_dir,
+        "status": status,  # "in_progress", "completed", "interrupted"
+        "created_at": datetime.now().isoformat(),
+        "updated_at": datetime.now().isoformat(),
+        "progress": {
+            "script_parsed": False,
+            "audio_generated": False,
+            "images_generated": False,
+            "bgm_generated": False,
+            "video_generated": False,
+        },
+        "files": {
+            "script": None,
+            "prompts": None,
+            "audio_files": {},
+            "images": {},
+            "bgm": None,
+            "videos": [],
+        },
+        "settings": {
+            "output_mode": None,
+            "output_formats": [],
+        },
+    }
+
+
+def update_history_entry(entry_id: str, updates: dict) -> None:
+    """履歴エントリを更新"""
+    history = load_generation_history()
+    for entry in history:
+        if entry["id"] == entry_id:
+            for key, value in updates.items():
+                if isinstance(value, dict) and key in entry and isinstance(entry[key], dict):
+                    entry[key].update(value)
+                else:
+                    entry[key] = value
+            entry["updated_at"] = datetime.now().isoformat()
+            break
+    save_generation_history(history)
+
+
+def add_history_entry(entry: dict) -> None:
+    """履歴エントリを追加"""
+    history = load_generation_history()
+    # 同じIDがあれば更新、なければ追加
+    existing = next((i for i, e in enumerate(history) if e["id"] == entry["id"]), None)
+    if existing is not None:
+        history[existing] = entry
+    else:
+        history.insert(0, entry)  # 新しいものを先頭に
+    # 最大50件まで保持
+    history = history[:50]
+    save_generation_history(history)
+
+
+def get_history_entry(entry_id: str) -> dict | None:
+    """履歴エントリを取得"""
+    history = load_generation_history()
+    for entry in history:
+        if entry["id"] == entry_id:
+            return entry
+    return None
+
+
 def main_page() -> None:
     """P-001: 動画生成メインページ"""
     st.title("🎬 動画生成エージェント")
@@ -345,6 +442,82 @@ def main_page() -> None:
             "images": {},
             "bgm": None,
         }
+    if "current_history_id" not in st.session_state:
+        st.session_state.current_history_id = None
+    if "resume_mode" not in st.session_state:
+        st.session_state.resume_mode = {
+            "enabled": False,
+            "entry": None,
+        }
+
+    # 履歴と再開オプション
+    history = load_generation_history()
+    interrupted_entries = [e for e in history if e["status"] == "interrupted"]
+
+    if interrupted_entries:
+        with st.expander("⏸️ 中断された生成を再開", expanded=True):
+            st.markdown("以前中断された生成を再開できます。")
+
+            for entry in interrupted_entries[:5]:  # 最大5件表示
+                progress = entry.get("progress", {})
+                completed_steps = sum(1 for v in progress.values() if v)
+                total_steps = len(progress)
+
+                col1, col2, col3 = st.columns([3, 2, 1])
+                with col1:
+                    st.markdown(f"**{entry['id']}**")
+                    st.caption(f"出力先: {entry.get('output_dir', '不明')}")
+                with col2:
+                    st.progress(completed_steps / total_steps if total_steps > 0 else 0)
+                    steps_text = []
+                    if progress.get("script_parsed"):
+                        steps_text.append("✅台本")
+                    if progress.get("audio_generated"):
+                        steps_text.append("✅音声")
+                    if progress.get("images_generated"):
+                        steps_text.append("✅画像")
+                    if progress.get("bgm_generated"):
+                        steps_text.append("✅BGM")
+                    if progress.get("video_generated"):
+                        steps_text.append("✅動画")
+                    st.caption(" ".join(steps_text) if steps_text else "未開始")
+                with col3:
+                    if st.button("▶️ 再開", key=f"resume_{entry['id']}"):
+                        # 再開モードを有効化
+                        st.session_state.resume_mode = {
+                            "enabled": True,
+                            "entry": entry,
+                        }
+                        # 素材を読み込む
+                        folder_name = Path(entry.get("output_dir", "")).name
+                        if folder_name:
+                            materials = load_existing_materials(folder_name)
+                            st.session_state.reuse_mode = {
+                                "enabled": True,
+                                "folder": folder_name,
+                                "audio_files": materials["audio_files"],
+                                "images": materials["images"],
+                                "bgm": materials["bgm"],
+                            }
+                        st.success(f"✅ {entry['id']} を再開します")
+                        st.rerun()
+
+            st.divider()
+
+    # 完了した履歴を表示
+    completed_entries = [e for e in history if e["status"] == "completed"][:10]
+    if completed_entries:
+        with st.expander("📜 生成履歴", expanded=False):
+            for entry in completed_entries:
+                col1, col2 = st.columns([4, 1])
+                with col1:
+                    st.markdown(f"**{entry['id']}** - ✅ 完了")
+                    st.caption(f"出力先: {entry.get('output_dir', '不明')}")
+                with col2:
+                    folder_path = Path(entry.get("output_dir", ""))
+                    if folder_path.exists():
+                        if st.button("📂 開く", key=f"open_{entry['id']}"):
+                            st.info(f"出力フォルダ: {folder_path}")
 
     # 素材再利用オプション（STEP 0）
     existing_folders = get_existing_output_folders()
@@ -741,6 +914,9 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
     else:
         st.info(f"🎬 **自動モード**で実行中（動画を生成します）: {output_formats}")
 
+    # 履歴エントリを初期化
+    history_entry = None
+
     try:
         # 早期バリデーション: 台本の確認
         if not script or not script.lines or len(script.lines) == 0:
@@ -757,6 +933,23 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
 
         output_dir = st.session_state.output_dir or get_output_dir()
         st.session_state.output_dir = output_dir
+
+        # 履歴エントリを作成
+        if st.session_state.resume_mode["enabled"] and st.session_state.resume_mode["entry"]:
+            # 再開モードの場合、既存のエントリを使用
+            history_entry = st.session_state.resume_mode["entry"]
+            history_entry["status"] = "in_progress"
+            st.session_state.current_history_id = history_entry["id"]
+        else:
+            # 新規作成
+            history_entry = create_history_entry(str(output_dir))
+            history_entry["settings"]["output_mode"] = mode
+            history_entry["settings"]["output_formats"] = output_formats
+            st.session_state.current_history_id = history_entry["id"]
+
+        # 台本パース完了
+        history_entry["progress"]["script_parsed"] = True
+        add_history_entry(history_entry)
 
         # ステップ1: 音声生成（まだ生成していない場合）
         audio_mode = st.session_state.get("audio_mode", "batch")
@@ -790,6 +983,12 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
                     progress.progress((i + 1) / (script.total_lines * 4))
 
         progress.progress(0.25)
+
+        # 履歴更新: 音声生成完了
+        if history_entry:
+            history_entry["progress"]["audio_generated"] = True
+            history_entry["files"]["audio_files"] = dict(st.session_state.audio_files)
+            add_history_entry(history_entry)
 
         # ステップ2: 画像生成
         generated_images = {}
@@ -879,6 +1078,12 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
 
         progress.progress(0.5)
 
+        # 履歴更新: 画像生成完了
+        if history_entry:
+            history_entry["progress"]["images_generated"] = True
+            history_entry["files"]["images"] = {str(k): v for k, v in generated_images.items()}
+            add_history_entry(history_entry)
+
         # ステップ2.5: 背景動画のダウンロード
         background_videos = {}
         status.text("🎥 背景動画を検索中...")
@@ -964,6 +1169,12 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
                 bgm_path = None
 
         progress.progress(0.75)
+
+        # 履歴更新: BGM生成完了
+        if history_entry:
+            history_entry["progress"]["bgm_generated"] = True
+            history_entry["files"]["bgm"] = str(bgm_path) if bgm_path else None
+            add_history_entry(history_entry)
 
         # ステップ4: Filmoraモードの場合はタイムライン生成
         if "Filmora" in mode:
@@ -1186,18 +1397,33 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
                     st.success(f"✅ {fmt}.mp4 を生成しました")
                 except Exception as video_err:
                     st.error(f"❌ {fmt} 動画生成エラー: {video_err}")
-                    import traceback
                     st.code(traceback.format_exc())
 
         progress.progress(1.0)
         status.text("✅ 生成完了！")
+
+        # 履歴更新: 動画生成完了（全体完了）
+        if history_entry:
+            history_entry["progress"]["video_generated"] = True
+            history_entry["status"] = "completed"
+            add_history_entry(history_entry)
+
+        # 再開モードをリセット
+        st.session_state.resume_mode = {"enabled": False, "entry": None}
+        st.session_state.current_history_id = None
+
         st.session_state.generation_complete = True
         st.rerun()
 
     except Exception as e:
         st.error(f"❌ 生成エラー: {e}")
-        import traceback
         st.code(traceback.format_exc())
+
+        # 履歴更新: 中断
+        if history_entry:
+            history_entry["status"] = "interrupted"
+            add_history_entry(history_entry)
+            st.warning("⚠️ 生成が中断されました。「中断された生成を再開」から再開できます。")
 
 
 def settings_page() -> None:
@@ -1467,7 +1693,7 @@ def main() -> None:
         )
 
         st.divider()
-        st.markdown("**バージョン:** 0.1.4")
+        st.markdown("**バージョン:** 0.1.5")
         st.markdown("[📖 ドキュメント](docs/requirements.md)")
 
     # ページルーティング
