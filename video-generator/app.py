@@ -1006,7 +1006,18 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
             st.session_state.audio_files = st.session_state.reuse_mode["audio_files"]
             st.success(f"♻️ 既存の音声ファイルを再利用: {len(st.session_state.audio_files)}件")
         elif not st.session_state.audio_files:
+            # セリフ数に基づく警告
+            total_lines = len(script.lines) if script.lines else 0
+            estimated_time = total_lines * 8  # 約8秒/セリフ（7秒待機 + 処理）
+            estimated_minutes = estimated_time // 60
+
             status.text("🎤 音声を生成中...")
+            if total_lines > 50:
+                st.warning(f"⚠️ セリフ数: {total_lines}行（Gemini TTS 1日上限: 50〜100回）")
+                st.info(f"💡 予想所要時間: 約{estimated_minutes}分（レート制限対策のため各セリフ間に7秒待機）")
+            elif total_lines > 10:
+                st.info(f"💡 セリフ数: {total_lines}行、予想所要時間: 約{estimated_minutes}分")
+
             try:
                 tts = TTSClient()
                 audio_dir = output_dir / "audio"
@@ -1016,7 +1027,7 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
                     # 一括生成モード
                     def update_progress(current, total, message):
                         progress.progress((current + 1) / (total * 4))
-                        status.text(f"🎤 生成中: {current + 1}/{total} - {message}")
+                        status.text(f"🎤 生成中: {current + 1}/{total} - {message}（7秒待機中...）")
 
                     output_path = audio_dir / "full_audio.wav"
                     # allow_fallback=False: クォータ超過時は機械音声にフォールバックせず停止
@@ -1784,7 +1795,7 @@ def main() -> None:
         )
 
         st.divider()
-        st.markdown("**バージョン:** 0.1.8")
+        st.markdown("**バージョン:** 0.1.9")
         st.markdown("[📖 ドキュメント](docs/requirements.md)")
 
     # ページルーティング

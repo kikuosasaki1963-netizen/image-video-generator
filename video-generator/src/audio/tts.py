@@ -386,9 +386,9 @@ class TTSClient:
                         try:
                             wav_path = self._synthesize_gemini(line.text, line.speaker, temp_path)
                             gemini_success = True
-                            # 成功した場合、レート制限を避けるため待機
+                            # 成功した場合、レート制限を避けるため待機（RPM=10なので6秒以上必要）
                             if i < total_lines - 1:
-                                time.sleep(0.8)  # 待機時間を少し増やす
+                                time.sleep(7.0)  # 7秒待機（1分に約8-9リクエスト、RPM=10以内）
                             break
                         except TTSError as e:
                             last_error = e
@@ -403,13 +403,15 @@ class TTSClient:
                                     logger.error(error_msg)
                                     raise TTSError(error_msg, original_error=e, is_quota_error=True)
                             else:
-                                # 一時的なエラー: リトライ
-                                logger.warning(f"Gemini TTS エラー（リトライ {retry + 1}/3）: {e.message}")
-                                time.sleep(1.5 * (retry + 1))  # 段階的に待機時間を増やす
+                                # 一時的なエラー: リトライ（レート制限対策で長めに待機）
+                                wait_time = 10.0 * (retry + 1)  # 10秒、20秒、30秒
+                                logger.warning(f"Gemini TTS エラー（リトライ {retry + 1}/3、{wait_time}秒待機）: {e.message}")
+                                time.sleep(wait_time)
                         except Exception as e:
                             last_error = e
-                            logger.warning(f"Gemini TTS 予期しないエラー（リトライ {retry + 1}/3）: {e}")
-                            time.sleep(1.5 * (retry + 1))
+                            wait_time = 10.0 * (retry + 1)
+                            logger.warning(f"Gemini TTS 予期しないエラー（リトライ {retry + 1}/3、{wait_time}秒待機）: {e}")
+                            time.sleep(wait_time)
 
                     # Gemini TTSが失敗した場合
                     if not gemini_success:
