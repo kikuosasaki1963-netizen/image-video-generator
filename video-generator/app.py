@@ -410,6 +410,22 @@ def get_history_entry(entry_id: str) -> dict | None:
     return None
 
 
+def delete_history_entry(entry_id: str) -> bool:
+    """履歴エントリを削除"""
+    history = load_generation_history()
+    original_len = len(history)
+    history = [e for e in history if e["id"] != entry_id]
+    if len(history) < original_len:
+        save_generation_history(history)
+        return True
+    return False
+
+
+def clear_all_history() -> None:
+    """全履歴を削除"""
+    save_generation_history([])
+
+
 def main_page() -> None:
     """P-001: 動画生成メインページ"""
     st.title("🎬 動画生成エージェント")
@@ -450,74 +466,95 @@ def main_page() -> None:
             "entry": None,
         }
 
-    # 履歴と再開オプション
-    history = load_generation_history()
-    interrupted_entries = [e for e in history if e["status"] == "interrupted"]
+    # 履歴セクション（常に表示）
+    with st.expander("📜 生成履歴", expanded=True):
+        history = load_generation_history()
 
-    if interrupted_entries:
-        with st.expander("⏸️ 中断された生成を再開", expanded=True):
-            st.markdown("以前中断された生成を再開できます。")
+        if not history:
+            st.info("履歴がありません。生成を実行すると履歴が記録されます。")
+        else:
+            # 中断された生成
+            interrupted_entries = [e for e in history if e["status"] == "interrupted"]
+            if interrupted_entries:
+                st.subheader("⏸️ 中断された生成")
+                st.markdown("以下の生成を再開できます。")
 
-            for entry in interrupted_entries[:5]:  # 最大5件表示
-                progress = entry.get("progress", {})
-                completed_steps = sum(1 for v in progress.values() if v)
-                total_steps = len(progress)
+                for entry in interrupted_entries[:5]:
+                    progress = entry.get("progress", {})
+                    completed_steps = sum(1 for v in progress.values() if v)
+                    total_steps = len(progress)
 
-                col1, col2, col3 = st.columns([3, 2, 1])
-                with col1:
-                    st.markdown(f"**{entry['id']}**")
-                    st.caption(f"出力先: {entry.get('output_dir', '不明')}")
-                with col2:
-                    st.progress(completed_steps / total_steps if total_steps > 0 else 0)
-                    steps_text = []
-                    if progress.get("script_parsed"):
-                        steps_text.append("✅台本")
-                    if progress.get("audio_generated"):
-                        steps_text.append("✅音声")
-                    if progress.get("images_generated"):
-                        steps_text.append("✅画像")
-                    if progress.get("bgm_generated"):
-                        steps_text.append("✅BGM")
-                    if progress.get("video_generated"):
-                        steps_text.append("✅動画")
-                    st.caption(" ".join(steps_text) if steps_text else "未開始")
-                with col3:
-                    if st.button("▶️ 再開", key=f"resume_{entry['id']}"):
-                        # 再開モードを有効化
-                        st.session_state.resume_mode = {
-                            "enabled": True,
-                            "entry": entry,
-                        }
-                        # 素材を読み込む
-                        folder_name = Path(entry.get("output_dir", "")).name
-                        if folder_name:
-                            materials = load_existing_materials(folder_name)
-                            st.session_state.reuse_mode = {
+                    col1, col2, col3, col4 = st.columns([3, 2, 1, 1])
+                    with col1:
+                        st.markdown(f"**{entry['id']}**")
+                        st.caption(f"出力先: {entry.get('output_dir', '不明')}")
+                    with col2:
+                        st.progress(completed_steps / total_steps if total_steps > 0 else 0)
+                        steps_text = []
+                        if progress.get("script_parsed"):
+                            steps_text.append("✅台本")
+                        if progress.get("audio_generated"):
+                            steps_text.append("✅音声")
+                        if progress.get("images_generated"):
+                            steps_text.append("✅画像")
+                        if progress.get("bgm_generated"):
+                            steps_text.append("✅BGM")
+                        if progress.get("video_generated"):
+                            steps_text.append("✅動画")
+                        st.caption(" ".join(steps_text) if steps_text else "未開始")
+                    with col3:
+                        if st.button("▶️ 再開", key=f"resume_{entry['id']}"):
+                            st.session_state.resume_mode = {
                                 "enabled": True,
-                                "folder": folder_name,
-                                "audio_files": materials["audio_files"],
-                                "images": materials["images"],
-                                "bgm": materials["bgm"],
+                                "entry": entry,
                             }
-                        st.success(f"✅ {entry['id']} を再開します")
-                        st.rerun()
+                            folder_name = Path(entry.get("output_dir", "")).name
+                            if folder_name:
+                                materials = load_existing_materials(folder_name)
+                                st.session_state.reuse_mode = {
+                                    "enabled": True,
+                                    "folder": folder_name,
+                                    "audio_files": materials["audio_files"],
+                                    "images": materials["images"],
+                                    "bgm": materials["bgm"],
+                                }
+                            st.success(f"✅ {entry['id']} を再開します")
+                            st.rerun()
+                    with col4:
+                        if st.button("🗑️", key=f"del_int_{entry['id']}", help="この履歴を削除"):
+                            delete_history_entry(entry["id"])
+                            st.rerun()
 
+                st.divider()
+
+            # 完了した履歴
+            completed_entries = [e for e in history if e["status"] == "completed"][:10]
+            if completed_entries:
+                st.subheader("✅ 完了した生成")
+
+                for entry in completed_entries:
+                    col1, col2, col3 = st.columns([4, 1, 1])
+                    with col1:
+                        st.markdown(f"**{entry['id']}**")
+                        st.caption(f"出力先: {entry.get('output_dir', '不明')}")
+                    with col2:
+                        folder_path = Path(entry.get("output_dir", ""))
+                        if folder_path.exists():
+                            if st.button("📂 開く", key=f"open_{entry['id']}"):
+                                st.info(f"出力フォルダ: {folder_path}")
+                    with col3:
+                        if st.button("🗑️", key=f"del_comp_{entry['id']}", help="この履歴を削除"):
+                            delete_history_entry(entry["id"])
+                            st.rerun()
+
+            # 全削除ボタン
             st.divider()
-
-    # 完了した履歴を表示
-    completed_entries = [e for e in history if e["status"] == "completed"][:10]
-    if completed_entries:
-        with st.expander("📜 生成履歴", expanded=False):
-            for entry in completed_entries:
-                col1, col2 = st.columns([4, 1])
-                with col1:
-                    st.markdown(f"**{entry['id']}** - ✅ 完了")
-                    st.caption(f"出力先: {entry.get('output_dir', '不明')}")
-                with col2:
-                    folder_path = Path(entry.get("output_dir", ""))
-                    if folder_path.exists():
-                        if st.button("📂 開く", key=f"open_{entry['id']}"):
-                            st.info(f"出力フォルダ: {folder_path}")
+            col1, col2 = st.columns([3, 1])
+            with col2:
+                if st.button("🗑️ 全履歴を削除", type="secondary"):
+                    clear_all_history()
+                    st.success("✅ 履歴を全て削除しました")
+                    st.rerun()
 
     # 素材再利用オプション（STEP 0）
     existing_folders = get_existing_output_folders()
@@ -1693,7 +1730,7 @@ def main() -> None:
         )
 
         st.divider()
-        st.markdown("**バージョン:** 0.1.5")
+        st.markdown("**バージョン:** 0.1.6")
         st.markdown("[📖 ドキュメント](docs/requirements.md)")
 
     # ページルーティング
