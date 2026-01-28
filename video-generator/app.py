@@ -488,6 +488,9 @@ def main_page() -> None:
                     with col1:
                         st.markdown(f"**{entry['id']}**")
                         st.caption(f"出力先: {entry.get('output_dir', '不明')}")
+                        # エラー情報を表示
+                        if entry.get("error"):
+                            st.caption(f"❌ エラー: {entry['error'][:50]}...")
                     with col2:
                         st.progress(completed_steps / total_steps if total_steps > 0 else 0)
                         steps_text = []
@@ -951,8 +954,25 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
     else:
         st.info(f"🎬 **自動モード**で実行中（動画を生成します）: {output_formats}")
 
-    # 履歴エントリを初期化
+    # 出力ディレクトリを最初に作成
+    output_dir = st.session_state.output_dir or get_output_dir()
+    st.session_state.output_dir = output_dir
+
+    # 履歴エントリを最初に作成して保存
     history_entry = None
+    try:
+        if st.session_state.resume_mode["enabled"] and st.session_state.resume_mode["entry"]:
+            history_entry = st.session_state.resume_mode["entry"]
+            history_entry["status"] = "in_progress"
+        else:
+            history_entry = create_history_entry(str(output_dir))
+            history_entry["settings"]["output_mode"] = mode
+            history_entry["settings"]["output_formats"] = output_formats
+
+        st.session_state.current_history_id = history_entry["id"]
+        add_history_entry(history_entry)  # 即座に保存
+    except Exception as init_err:
+        st.warning(f"⚠️ 履歴初期化エラー: {init_err}")
 
     try:
         # 早期バリデーション: 台本の確認
@@ -966,27 +986,16 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
 
             ファイルを確認して、セリフが含まれていることを確認してください。
             """)
+            if history_entry:
+                history_entry["status"] = "interrupted"
+                history_entry["error"] = "台本が空"
+                add_history_entry(history_entry)
             return
 
-        output_dir = st.session_state.output_dir or get_output_dir()
-        st.session_state.output_dir = output_dir
-
-        # 履歴エントリを作成
-        if st.session_state.resume_mode["enabled"] and st.session_state.resume_mode["entry"]:
-            # 再開モードの場合、既存のエントリを使用
-            history_entry = st.session_state.resume_mode["entry"]
-            history_entry["status"] = "in_progress"
-            st.session_state.current_history_id = history_entry["id"]
-        else:
-            # 新規作成
-            history_entry = create_history_entry(str(output_dir))
-            history_entry["settings"]["output_mode"] = mode
-            history_entry["settings"]["output_formats"] = output_formats
-            st.session_state.current_history_id = history_entry["id"]
-
         # 台本パース完了
-        history_entry["progress"]["script_parsed"] = True
-        add_history_entry(history_entry)
+        if history_entry:
+            history_entry["progress"]["script_parsed"] = True
+            add_history_entry(history_entry)
 
         # ステップ1: 音声生成（まだ生成していない場合）
         audio_mode = st.session_state.get("audio_mode", "batch")
@@ -998,26 +1007,35 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
             st.success(f"♻️ 既存の音声ファイルを再利用: {len(st.session_state.audio_files)}件")
         elif not st.session_state.audio_files:
             status.text("🎤 音声を生成中...")
-            tts = TTSClient()
-            audio_dir = output_dir / "audio"
-            audio_dir.mkdir(exist_ok=True)
+            try:
+                tts = TTSClient()
+                audio_dir = output_dir / "audio"
+                audio_dir.mkdir(exist_ok=True)
 
-            if audio_mode == "batch":
-                # 一括生成モード
-                def update_progress(current, total, message):
-                    progress.progress((current + 1) / (total * 4))
-                    status.text(f"🎤 生成中: {current + 1}/{total} - {message}")
+                if audio_mode == "batch":
+                    # 一括生成モード
+                    def update_progress(current, total, message):
+                        progress.progress((current + 1) / (total * 4))
+                        status.text(f"🎤 生成中: {current + 1}/{total} - {message}")
 
-                output_path = audio_dir / "full_audio.wav"
-                wav_path = tts.synthesize_script(script, output_path, progress_callback=update_progress)
-                st.session_state.audio_files["full"] = str(wav_path)
-            else:
-                # 個別生成モード
-                for i, line in enumerate(script.lines):
-                    output_path = audio_dir / f"{line.number:03d}_{line.speaker}.wav"
-                    wav_path = tts.synthesize(line.text, line.speaker, output_path)
-                    st.session_state.audio_files[line.number] = str(wav_path)
-                    progress.progress((i + 1) / (script.total_lines * 4))
+                    output_path = audio_dir / "full_audio.wav"
+                    wav_path = tts.synthesize_script(script, output_path, progress_callback=update_progress)
+                    st.session_state.audio_files["full"] = str(wav_path)
+                else:
+                    # 個別生成モード
+                    for i, line in enumerate(script.lines):
+                        output_path = audio_dir / f"{line.number:03d}_{line.speaker}.wav"
+                        wav_path = tts.synthesize(line.text, line.speaker, output_path)
+                        st.session_state.audio_files[line.number] = str(wav_path)
+                        progress.progress((i + 1) / (script.total_lines * 4))
+            except Exception as audio_err:
+                st.error(f"❌ 音声生成エラー: {audio_err}")
+                st.code(traceback.format_exc())
+                if history_entry:
+                    history_entry["status"] = "interrupted"
+                    history_entry["error"] = f"音声生成エラー: {audio_err}"
+                    add_history_entry(history_entry)
+                raise  # 再スロー
 
         progress.progress(0.25)
 
@@ -1453,14 +1471,38 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
         st.rerun()
 
     except Exception as e:
-        st.error(f"❌ 生成エラー: {e}")
-        st.code(traceback.format_exc())
+        error_msg = str(e)
+        error_trace = traceback.format_exc()
 
-        # 履歴更新: 中断
+        st.error(f"❌ 生成エラー: {error_msg}")
+        st.code(error_trace)
+
+        # 履歴更新: 中断（エラー情報を保存）
         if history_entry:
             history_entry["status"] = "interrupted"
+            history_entry["error"] = error_msg
+            history_entry["error_trace"] = error_trace[:500]  # 最大500文字
             add_history_entry(history_entry)
-            st.warning("⚠️ 生成が中断されました。「中断された生成を再開」から再開できます。")
+            st.warning("⚠️ 生成が中断されました。「📜 生成履歴」から再開できます。")
+        else:
+            # 履歴エントリがない場合も新規作成して保存
+            try:
+                emergency_entry = create_history_entry(str(output_dir) if output_dir else "unknown")
+                emergency_entry["status"] = "interrupted"
+                emergency_entry["error"] = error_msg
+                add_history_entry(emergency_entry)
+            except Exception:
+                pass  # 緊急保存も失敗した場合は無視
+
+    finally:
+        # 最終保存（中断状態の履歴が必ず保存されるように）
+        if history_entry and history_entry.get("status") == "in_progress":
+            history_entry["status"] = "interrupted"
+            history_entry["error"] = "予期せぬ中断"
+            try:
+                add_history_entry(history_entry)
+            except Exception:
+                pass
 
 
 def settings_page() -> None:
@@ -1730,7 +1772,7 @@ def main() -> None:
         )
 
         st.divider()
-        st.markdown("**バージョン:** 0.1.6")
+        st.markdown("**バージョン:** 0.1.7")
         st.markdown("[📖 ドキュメント](docs/requirements.md)")
 
     # ページルーティング
