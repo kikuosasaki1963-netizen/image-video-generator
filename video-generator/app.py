@@ -1467,7 +1467,7 @@ def main() -> None:
         )
 
         st.divider()
-        st.markdown("**バージョン:** 0.1.3")
+        st.markdown("**バージョン:** 0.1.4")
         st.markdown("[📖 ドキュメント](docs/requirements.md)")
 
     # ページルーティング
