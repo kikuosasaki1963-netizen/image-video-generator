@@ -1019,7 +1019,12 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
                         status.text(f"🎤 生成中: {current + 1}/{total} - {message}")
 
                     output_path = audio_dir / "full_audio.wav"
-                    wav_path = tts.synthesize_script(script, output_path, progress_callback=update_progress)
+                    # allow_fallback=False: クォータ超過時は機械音声にフォールバックせず停止
+                    wav_path = tts.synthesize_script(
+                        script, output_path,
+                        progress_callback=update_progress,
+                        allow_fallback=False
+                    )
                     st.session_state.audio_files["full"] = str(wav_path)
                 else:
                     # 個別生成モード
@@ -1029,7 +1034,14 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
                         st.session_state.audio_files[line.number] = str(wav_path)
                         progress.progress((i + 1) / (script.total_lines * 4))
             except Exception as audio_err:
-                st.error(f"❌ 音声生成エラー: {audio_err}")
+                error_str = str(audio_err)
+                # クォータエラーの場合は特別なメッセージ
+                if "クォータ" in error_str or "quota" in error_str.lower() or "429" in error_str:
+                    st.error("❌ 音声生成クォータ超過")
+                    st.warning("⚠️ Gemini TTS のクォータ上限に達しました。クォータがリセットされるまでお待ちください（通常17:00頃）。")
+                    st.info("💡 生成途中の素材は保存されています。「📜 生成履歴」から再開できます。")
+                else:
+                    st.error(f"❌ 音声生成エラー: {audio_err}")
                 st.code(traceback.format_exc())
                 if history_entry:
                     history_entry["status"] = "interrupted"
@@ -1772,7 +1784,7 @@ def main() -> None:
         )
 
         st.divider()
-        st.markdown("**バージョン:** 0.1.7")
+        st.markdown("**バージョン:** 0.1.8")
         st.markdown("[📖 ドキュメント](docs/requirements.md)")
 
     # ページルーティング
