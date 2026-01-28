@@ -228,9 +228,33 @@ def get_output_dir() -> Path:
     return output_dir
 
 
-def get_existing_output_folders() -> list[str]:
-    """既存の出力フォルダ一覧を取得"""
-    # セッション状態からカスタム出力先を取得（あれば）
+def get_existing_output_folders() -> list[tuple[str, str]]:
+    """既存の出力フォルダ一覧を取得（履歴からも取得）
+
+    Returns:
+        list of (folder_name, full_path) tuples
+    """
+    folders = []
+    seen_names = set()
+
+    # 1. 履歴から出力フォルダを取得（最優先）
+    history = load_generation_history()
+    for entry in history:
+        output_dir = entry.get("output_dir", "")
+        if output_dir:
+            output_path = Path(output_dir)
+            if output_path.exists():
+                # audio, images, bgmのいずれかが存在するかチェック
+                has_audio = (output_path / "audio").exists()
+                has_images = (output_path / "images").exists()
+                has_bgm = (output_path / "bgm").exists()
+                if has_audio or has_images or has_bgm:
+                    folder_name = output_path.name
+                    if folder_name not in seen_names:
+                        folders.append((folder_name, str(output_path)))
+                        seen_names.add(folder_name)
+
+    # 2. 設定の出力フォルダからも取得
     if "custom_output_folder" in st.session_state and st.session_state.custom_output_folder:
         output_folder = st.session_state.custom_output_folder
     else:
@@ -239,27 +263,35 @@ def get_existing_output_folders() -> list[str]:
 
     output_path = Path(output_folder)
 
-    if not output_path.exists():
-        return []
-
-    folders = []
-    for folder in sorted(output_path.iterdir(), reverse=True):
-        if folder.is_dir() and not folder.name.startswith("."):
-            # audio, images, bgmのいずれかが存在するフォルダのみ
-            has_audio = (folder / "audio").exists()
-            has_images = (folder / "images").exists()
-            has_bgm = (folder / "bgm").exists()
-            if has_audio or has_images or has_bgm:
-                folders.append(folder.name)
+    if output_path.exists():
+        for folder in sorted(output_path.iterdir(), reverse=True):
+            if folder.is_dir() and not folder.name.startswith("."):
+                has_audio = (folder / "audio").exists()
+                has_images = (folder / "images").exists()
+                has_bgm = (folder / "bgm").exists()
+                if has_audio or has_images or has_bgm:
+                    folder_name = folder.name
+                    if folder_name not in seen_names:
+                        folders.append((folder_name, str(folder)))
+                        seen_names.add(folder_name)
 
     return folders
 
 
-def load_existing_materials(folder_name: str) -> dict:
-    """指定フォルダから素材を読み込む"""
-    settings = load_settings()
-    output_folder = settings.get("defaults", {}).get("output_folder", "output")
-    folder_path = Path(output_folder) / folder_name
+def load_existing_materials(folder_path_or_name: str) -> dict:
+    """指定フォルダから素材を読み込む
+
+    Args:
+        folder_path_or_name: フルパスまたはフォルダ名
+    """
+    # フルパスかどうかを判定
+    if os.path.isabs(folder_path_or_name) or folder_path_or_name.startswith("/"):
+        folder_path = Path(folder_path_or_name)
+    else:
+        # フォルダ名の場合は設定から親フォルダを取得
+        settings = load_settings()
+        output_folder = settings.get("defaults", {}).get("output_folder", "output")
+        folder_path = Path(output_folder) / folder_path_or_name
 
     result = {
         "audio_files": {},
@@ -706,30 +738,37 @@ def main_page() -> None:
                     st.rerun()
 
     # 素材再利用オプション（STEP 0）
-    existing_folders = get_existing_output_folders()
-    if existing_folders:
-        with st.expander("♻️ 素材再利用（オプション）", expanded=False):
-            st.markdown("以前生成した素材を再利用して、動画のみ再生成できます。APIクレジットを節約できます。")
+    existing_folders = get_existing_output_folders()  # list of (name, path) tuples
+    with st.expander("♻️ 素材再利用（オプション）", expanded=False):
+        st.markdown("以前生成した素材を再利用して、動画のみ再生成できます。APIクレジットを節約できます。")
 
-            selected_folder = st.selectbox(
+        if existing_folders:
+            # フォルダ選択肢を作成（表示名: パス）
+            folder_options = {f"{name} ({path})": path for name, path in existing_folders}
+            folder_display_names = ["選択してください"] + list(folder_options.keys())
+
+            selected_display = st.selectbox(
                 "再利用するフォルダを選択",
-                options=["選択してください"] + existing_folders,
+                options=folder_display_names,
                 key="reuse_folder_select",
             )
 
-            if selected_folder != "選択してください":
+            if selected_display != "選択してください":
+                selected_path = folder_options[selected_display]
                 if st.button("📂 素材を読み込む", type="secondary"):
-                    materials = load_existing_materials(selected_folder)
+                    materials = load_existing_materials(selected_path)
 
                     st.session_state.reuse_mode = {
                         "enabled": True,
-                        "folder": selected_folder,
+                        "folder": selected_path,
                         "audio_files": materials["audio_files"],
                         "images": materials["images"],
                         "bgm": materials["bgm"],
                     }
 
                     st.success("✅ 素材を読み込みました")
+        else:
+            st.info("📁 再利用可能なフォルダがありません。生成を実行すると、ここに表示されます。")
 
             # 読み込み結果を表示
             if st.session_state.reuse_mode["enabled"]:
@@ -1953,7 +1992,7 @@ def main() -> None:
         )
 
         st.divider()
-        st.markdown("**バージョン:** 0.2.0")
+        st.markdown("**バージョン:** 0.2.1")
         st.markdown("[📖 ドキュメント](docs/requirements.md)")
 
     # ページルーティング
