@@ -1164,31 +1164,63 @@ def main_page() -> None:
     # STEP 5: 結果ダウンロード
     st.header("STEP 5: 結果ダウンロード")
 
-    if st.session_state.generation_complete and st.session_state.output_dir:
+    # 出力ディレクトリの確認（完了・失敗に関わらず）
+    output_dir = None
+    if st.session_state.output_dir:
         output_dir = Path(st.session_state.output_dir)
-        st.success(f"✅ 生成完了！出力先: {output_dir}")
 
-        # ZIPファイル作成とダウンロード
-        zip_buffer = BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            for file_path in output_dir.rglob("*"):
-                if file_path.is_file():
-                    arcname = file_path.relative_to(output_dir)
-                    zf.write(file_path, arcname)
+    if output_dir and output_dir.exists():
+        # ファイル数をカウント
+        all_files = list(output_dir.rglob("*"))
+        file_count = len([f for f in all_files if f.is_file()])
 
-        zip_buffer.seek(0)
-        st.download_button(
-            label="📥 生成物をダウンロード (ZIP)",
-            data=zip_buffer,
-            file_name=f"video_output_{output_dir.name}.zip",
-            mime="application/zip",
-        )
+        if file_count > 0:
+            if st.session_state.generation_complete:
+                st.success(f"✅ 生成完了！出力先: {output_dir}")
+            else:
+                st.warning(f"⚠️ 生成が中断されましたが、一部の素材は保存されています。出力先: {output_dir}")
 
-        # 個別ファイル一覧
-        with st.expander("📁 生成ファイル一覧"):
-            for file_path in sorted(output_dir.rglob("*")):
-                if file_path.is_file():
-                    st.text(f"  {file_path.relative_to(output_dir)}")
+            # ファイル種別ごとのカウント
+            audio_files = list((output_dir / "audio").rglob("*")) if (output_dir / "audio").exists() else []
+            image_files = list((output_dir / "images").rglob("*")) if (output_dir / "images").exists() else []
+            bgm_files = list((output_dir / "bgm").rglob("*")) if (output_dir / "bgm").exists() else []
+            video_files = list((output_dir / "videos").rglob("*.mp4")) if (output_dir / "videos").exists() else []
+
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("🎤 音声", f"{len([f for f in audio_files if f.is_file()])}件")
+            with col2:
+                st.metric("🖼️ 画像", f"{len([f for f in image_files if f.is_file()])}枚")
+            with col3:
+                st.metric("🎵 BGM", f"{len([f for f in bgm_files if f.is_file()])}件")
+            with col4:
+                st.metric("🎬 動画", f"{len(video_files)}本")
+
+            # ZIPファイル作成とダウンロード
+            zip_buffer = BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                for file_path in output_dir.rglob("*"):
+                    if file_path.is_file():
+                        arcname = file_path.relative_to(output_dir)
+                        zf.write(file_path, arcname)
+
+            zip_buffer.seek(0)
+
+            download_label = "📥 生成物をダウンロード (ZIP)" if st.session_state.generation_complete else "📥 生成済み素材をダウンロード (ZIP)"
+            st.download_button(
+                label=download_label,
+                data=zip_buffer,
+                file_name=f"video_output_{output_dir.name}.zip",
+                mime="application/zip",
+            )
+
+            # 個別ファイル一覧
+            with st.expander("📁 生成ファイル一覧"):
+                for file_path in sorted(output_dir.rglob("*")):
+                    if file_path.is_file():
+                        st.text(f"  {file_path.relative_to(output_dir)}")
+        else:
+            st.info("📥 生成が完了すると、ここにダウンロードリンクが表示されます。")
     else:
         st.info("📥 生成が完了すると、ここにダウンロードリンクが表示されます。")
 
@@ -2087,7 +2119,7 @@ def main() -> None:
         )
 
         st.divider()
-        st.markdown("**バージョン:** 0.2.3")
+        st.markdown("**バージョン:** 0.2.4")
         st.markdown("[📖 ドキュメント](docs/requirements.md)")
 
     # ページルーティング
