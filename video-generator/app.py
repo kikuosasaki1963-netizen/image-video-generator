@@ -404,9 +404,19 @@ def load_existing_materials(folder_path_or_name: str) -> dict:
 
 def get_history_file_path() -> Path:
     """履歴ファイルのパスを取得"""
-    settings = load_settings()
-    output_folder = settings.get("defaults", {}).get("output_folder", "output")
-    return Path(output_folder) / "generation_history.json"
+    # セッション状態のカスタム出力先を優先
+    if "custom_output_folder" in st.session_state and st.session_state.custom_output_folder:
+        output_folder = st.session_state.custom_output_folder
+    else:
+        settings = load_settings()
+        output_folder = settings.get("defaults", {}).get("output_folder", "output")
+
+    history_path = Path(output_folder) / "generation_history.json"
+
+    # 親ディレクトリが存在しない場合は作成
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+
+    return history_path
 
 
 def load_generation_history() -> list[dict]:
@@ -2077,7 +2087,7 @@ def main() -> None:
         )
 
         st.divider()
-        st.markdown("**バージョン:** 0.2.2")
+        st.markdown("**バージョン:** 0.2.3")
         st.markdown("[📖 ドキュメント](docs/requirements.md)")
 
     # ページルーティング
