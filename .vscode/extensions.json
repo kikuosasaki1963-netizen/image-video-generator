@@ -1,0 +1,26 @@
+{
+  "recommendations": [
+    // Python開発
+    "ms-python.python",
+    "ms-python.vscode-pylance",
+    "ms-python.black-formatter",
+
+    // Git管理
+    "eamodio.gitlens",
+    "mhutchie.git-graph",
+
+    // AI支援ツール
+    "anthropic.claude-code",
+    "github.copilot",
+    "github.copilot-chat",
+
+    // UI/UX
+    "pkief.material-icon-theme",
+    "usernamehw.errorlens",
+
+    // ユーティリティ
+    "christian-kohler.path-intellisense",
+    "naumovs.color-highlight",
+    "ms-ceintl.vscode-language-pack-ja"
+  ]
+}
