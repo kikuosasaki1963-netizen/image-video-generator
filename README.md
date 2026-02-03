@@ -19,10 +19,31 @@ Google Imagen 3 を使用してテキストから画像を生成するエージ�
 pip install -r requirements.txt
 ```
 
-### 2. 環境変数の設定
+### 2. FFmpegのインストール
 
+動画処理にFFmpegが必要です。
+
+**Mac:**
+```bash
+brew install ffmpeg
+```
+
+**Windows:**
+1. [FFmpeg公式サイト](https://ffmpeg.org/download.html) からダウンロード
+2. または winget を使用: `winget install FFmpeg`
+3. または Chocolatey を使用: `choco install ffmpeg`
+4. インストール後、コマンドプロンプトで `ffmpeg -version` が動作することを確認
+
+### 3. 環境変数の設定
+
+**Mac/Linux:**
 ```bash
 cp .env.example .env
+```
+
+**Windows (コマンドプロンプト):**
+```cmd
+copy .env.example .env
 ```
 
 `.env` ファイルを編集して API キーを設定:
@@ -37,8 +58,20 @@ API キーは [Google AI Studio](https://aistudio.google.com/) から取得で�
 
 ### Streamlit UI
 
+**Mac/Linux:**
 ```bash
 streamlit run app.py
+# または
+./start.sh
+```
+
+**Windows:**
+```cmd
+streamlit run app.py
+```
+または `start.bat` をダブルクリック、または PowerShell で:
+```powershell
+.\start.ps1
 ```
 
 ブラウザで `http://localhost:8501` にアクセス
