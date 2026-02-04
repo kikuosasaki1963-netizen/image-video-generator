@@ -268,6 +268,33 @@ def generate_image_prompts_from_script(script, num_images: int):
     return ImagePromptList(filename="auto_generated", prompts=prompts)
 
 
+def get_default_output_folder() -> str:
+    """OSに応じたデフォルト出力フォルダを取得"""
+    import platform
+
+    # Docker環境かどうかを検出
+    is_docker = os.path.exists("/.dockerenv") or os.environ.get("DOCKER_CONTAINER", False)
+
+    if is_docker:
+        # Docker環境では /app/output を使用（ホストにマウントされている前提）
+        return "/app/output"
+
+    system = platform.system()
+    home = os.path.expanduser("~")
+
+    if system == "Windows":
+        # Windows: ドキュメントフォルダ内に作成
+        docs_folder = os.path.join(home, "Documents", "video-generator-output")
+        return docs_folder
+    elif system == "Darwin":
+        # macOS: ドキュメントフォルダ内に作成
+        docs_folder = os.path.join(home, "Documents", "video-generator-output")
+        return docs_folder
+    else:
+        # Linux: ホームディレクトリ内に作成
+        return os.path.join(home, "video-generator-output")
+
+
 def get_output_dir() -> Path:
     """出力ディレクトリを取得"""
     # セッション状態からカスタム出力先を取得（あれば）
@@ -275,7 +302,13 @@ def get_output_dir() -> Path:
         output_folder = st.session_state.custom_output_folder
     else:
         settings = load_settings()
-        output_folder = settings.get("defaults", {}).get("output_folder", "output")
+        configured_folder = settings.get("defaults", {}).get("output_folder", "")
+
+        # 設定が "output"（相対パス）または空の場合は、OS別デフォルトを使用
+        if not configured_folder or configured_folder == "output":
+            output_folder = get_default_output_folder()
+        else:
+            output_folder = configured_folder
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = Path(output_folder) / timestamp
@@ -299,10 +332,15 @@ def get_existing_output_folders() -> list[tuple[str, str]]:
         if output_dir:
             output_path = Path(output_dir)
             if output_path.exists():
-                # audio, images, bgmのいずれかが存在するかチェック
-                has_audio = (output_path / "audio").exists()
-                has_images = (output_path / "images").exists()
-                has_bgm = (output_path / "bgm").exists()
+                # audio, images, bgmのいずれかにファイルが存在するかチェック
+                audio_dir = output_path / "audio"
+                image_dir = output_path / "images"
+                bgm_dir = output_path / "bgm"
+
+                has_audio = audio_dir.exists() and any(audio_dir.glob("*.wav")) or any(audio_dir.glob("*.mp3")) if audio_dir.exists() else False
+                has_images = image_dir.exists() and (any(image_dir.glob("*.png")) or any(image_dir.glob("*.jpg"))) if image_dir.exists() else False
+                has_bgm = bgm_dir.exists() and (any(bgm_dir.glob("*.mp3")) or any(bgm_dir.glob("*.wav"))) if bgm_dir.exists() else False
+
                 if has_audio or has_images or has_bgm:
                     folder_name = output_path.name
                     if folder_name not in seen_names:
@@ -321,9 +359,15 @@ def get_existing_output_folders() -> list[tuple[str, str]]:
     if output_path.exists():
         for folder in sorted(output_path.iterdir(), reverse=True):
             if folder.is_dir() and not folder.name.startswith("."):
-                has_audio = (folder / "audio").exists()
-                has_images = (folder / "images").exists()
-                has_bgm = (folder / "bgm").exists()
+                # audio, images, bgmのいずれかにファイルが存在するかチェック
+                audio_dir = folder / "audio"
+                image_dir = folder / "images"
+                bgm_dir = folder / "bgm"
+
+                has_audio = audio_dir.exists() and (any(audio_dir.glob("*.wav")) or any(audio_dir.glob("*.mp3"))) if audio_dir.exists() else False
+                has_images = image_dir.exists() and (any(image_dir.glob("*.png")) or any(image_dir.glob("*.jpg"))) if image_dir.exists() else False
+                has_bgm = bgm_dir.exists() and (any(bgm_dir.glob("*.mp3")) or any(bgm_dir.glob("*.wav"))) if bgm_dir.exists() else False
+
                 if has_audio or has_images or has_bgm:
                     folder_name = folder.name
                     if folder_name not in seen_names:
@@ -1103,20 +1147,25 @@ def main_page() -> None:
 
             # ホームディレクトリとよく使うパスを取得
             home_dir = os.path.expanduser("~")
+
+            # OS別のデフォルトフォルダを取得
+            default_local_folder = get_default_output_folder()
+
             preset_paths = {
-                "デフォルト (output)": "output",
-                "ホーム": home_dir,
-                "デスクトップ": os.path.join(home_dir, "Desktop"),
+                "推奨（ローカル保存）": default_local_folder,
                 "ドキュメント": os.path.join(home_dir, "Documents"),
+                "デスクトップ": os.path.join(home_dir, "Desktop"),
                 "ダウンロード": os.path.join(home_dir, "Downloads"),
+                "ホーム": home_dir,
+                "相対パス (output)": "output",
                 "カスタム入力": "_custom_",
             }
 
-            # プリセット選択
+            # プリセット選択（推奨をデフォルトに）
             selected_preset = st.selectbox(
                 "出力先を選択",
                 options=list(preset_paths.keys()),
-                index=0,
+                index=0,  # 「推奨（ローカル保存）」がデフォルト
                 key="output_preset_select",
             )
 
@@ -1293,6 +1342,9 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
 
         # ステップ1: 音声生成（まだ生成していない場合）
         audio_mode = st.session_state.get("audio_mode", "batch")
+        audio_error_occurred = False  # 音声生成エラーフラグ
+        audio_dir = output_dir / "audio"
+        audio_dir.mkdir(exist_ok=True)
 
         # 再利用モードのチェック
         if st.session_state.reuse_mode["enabled"] and st.session_state.reuse_mode["audio_files"]:
@@ -1314,8 +1366,6 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
 
             try:
                 tts = TTSClient()
-                audio_dir = output_dir / "audio"
-                audio_dir.mkdir(exist_ok=True)
 
                 if audio_mode == "batch":
                     # 一括生成モード
@@ -1339,27 +1389,42 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
                         st.session_state.audio_files[line.number] = str(wav_path)
                         progress.progress((i + 1) / (script.total_lines * 4))
             except Exception as audio_err:
+                audio_error_occurred = True
                 error_str = str(audio_err)
                 # クォータエラーの場合は特別なメッセージ
                 if "クォータ" in error_str or "quota" in error_str.lower() or "429" in error_str:
                     st.error("❌ 音声生成クォータ超過")
-                    st.warning("⚠️ Gemini TTS のクォータ上限に達しました。クォータがリセットされるまでお待ちください（通常17:00頃）。")
-                    st.info("💡 生成途中の素材は保存されています。「📜 生成履歴」から再開できます。")
+                    st.warning("⚠️ Gemini TTS のクォータ上限に達しました。画像生成は続行します。")
                 else:
                     st.error(f"❌ 音声生成エラー: {audio_err}")
                 st.code(traceback.format_exc())
-                if history_entry:
-                    history_entry["status"] = "interrupted"
-                    history_entry["error"] = f"音声生成エラー: {audio_err}"
-                    add_history_entry(history_entry)
-                raise  # 再スロー
+
+                # 生成済みファイルを検出してセッションと履歴に保存
+                if audio_dir.exists():
+                    for wav_file in audio_dir.glob("*.wav"):
+                        if wav_file.name == "full_audio.wav":
+                            st.session_state.audio_files["full"] = str(wav_file)
+                        else:
+                            try:
+                                num = int(wav_file.stem.split("_")[0])
+                                st.session_state.audio_files[num] = str(wav_file)
+                            except (ValueError, IndexError):
+                                pass
+
+                if st.session_state.audio_files:
+                    st.info(f"💾 生成済み音声: {len(st.session_state.audio_files)}件を保存しました。画像生成を続行します。")
+                else:
+                    st.warning("⚠️ 音声は生成できませんでしたが、画像生成を続行します。")
 
         progress.progress(0.25)
 
-        # 履歴更新: 音声生成完了
+        # 履歴更新: 音声生成（部分的でも記録）
         if history_entry:
-            history_entry["progress"]["audio_generated"] = True
-            history_entry["files"]["audio_files"] = dict(st.session_state.audio_files)
+            if st.session_state.audio_files:
+                history_entry["progress"]["audio_generated"] = True
+                history_entry["files"]["audio_files"] = dict(st.session_state.audio_files)
+            if audio_error_occurred:
+                history_entry["error"] = history_entry.get("error", "") + "音声生成エラー; "
             add_history_entry(history_entry)
 
         # ステップ2: 画像生成
@@ -1573,48 +1638,55 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
                     except:
                         return 5.0  # デフォルト5秒
 
-            if "full" in st.session_state.audio_files:
-                # 一括生成モード: 1つの音声ファイル
-                audio_path = st.session_state.audio_files["full"]
-                duration = get_audio_duration(audio_path)
+            # 音声ファイルがある場合のみ音声エントリを追加
+            audio_total_duration = 0.0
+            if st.session_state.audio_files:
+                if "full" in st.session_state.audio_files:
+                    # 一括生成モード: 1つの音声ファイル
+                    audio_path = st.session_state.audio_files["full"]
+                    duration = get_audio_duration(audio_path)
 
-                timeline.add_entry(TimelineEntry(
-                    start_time=0.0,
-                    end_time=duration,
-                    media_type="audio",
-                    file_path=audio_path,
-                    speaker="all",
-                ))
+                    timeline.add_entry(TimelineEntry(
+                        start_time=0.0,
+                        end_time=duration,
+                        media_type="audio",
+                        file_path=audio_path,
+                        speaker="all",
+                    ))
+                    audio_total_duration = duration
+                else:
+                    # 個別生成モード: 各セリフごとのファイル
+                    current_time = 0.0
+                    for line in script.lines:
+                        if line.number in st.session_state.audio_files:
+                            audio_path = st.session_state.audio_files[line.number]
+                            duration = get_audio_duration(audio_path)
+
+                            timeline.add_entry(TimelineEntry(
+                                start_time=current_time,
+                                end_time=current_time + duration,
+                                media_type="audio",
+                                file_path=audio_path,
+                                speaker=line.speaker,
+                            ))
+                            current_time += duration
+                    audio_total_duration = current_time
             else:
-                # 個別生成モード: 各セリフごとのファイル
-                current_time = 0.0
-                for line in script.lines:
-                    if line.number in st.session_state.audio_files:
-                        audio_path = st.session_state.audio_files[line.number]
-                        duration = get_audio_duration(audio_path)
+                st.warning("⚠️ 音声ファイルがありません。画像のみのタイムラインを生成します。")
 
-                        timeline.add_entry(TimelineEntry(
-                            start_time=current_time,
-                            end_time=current_time + duration,
-                            media_type="audio",
-                            file_path=audio_path,
-                            speaker=line.speaker,
-                        ))
-                        current_time += duration
-
-            # 画像エントリ追加（音声の長さに合わせてスケーリング）
-            audio_total_duration = timeline.total_duration
-
+            # 画像エントリ追加（音声の長さに合わせてスケーリング、音声がない場合はプロンプト時間をそのまま使用）
             if prompts.prompts:
                 last_prompt = prompts.prompts[-1]
                 prompt_total_duration = time_to_seconds(last_prompt.end_time)
             else:
-                prompt_total_duration = audio_total_duration
+                # プロンプトがない場合はデフォルト（画像1枚5秒）
+                prompt_total_duration = len(generated_images) * 5.0 if generated_images else 10.0
 
-            if prompt_total_duration > 0:
+            # 音声がある場合はスケーリング、ない場合はプロンプト時間をそのまま使用
+            if audio_total_duration > 0 and prompt_total_duration > 0:
                 time_scale = audio_total_duration / prompt_total_duration
             else:
-                time_scale = 1.0
+                time_scale = 1.0  # 音声がない場合はスケーリングなし
 
             for p in prompts.prompts:
                 if p.number in generated_images:
@@ -1645,6 +1717,23 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
             status.text("🎬 動画を合成中...")
             editor = VideoEditor()
             timeline = Timeline()
+
+            # 音声がない場合は素材のみ保存して終了
+            if not st.session_state.audio_files:
+                st.warning("⚠️ 音声がないため、動画合成をスキップします。")
+                st.info("💡 画像素材は保存されています。「📜 生成履歴」から確認できます。")
+                progress.progress(1.0)
+                status.text("✅ 素材生成完了（音声なし）")
+
+                # 履歴更新: 素材生成完了（動画なし）
+                if history_entry:
+                    history_entry["status"] = "completed"
+                    history_entry["error"] = history_entry.get("error", "") + "音声なしのため動画合成スキップ"
+                    add_history_entry(history_entry)
+
+                st.session_state.generation_complete = True
+                st.rerun()
+                return
 
             # 音声ファイルの長さを取得（エラー時はフォールバック）
             def get_audio_duration_auto(audio_path: str) -> float:
@@ -1919,18 +2008,22 @@ def settings_page() -> None:
         )
 
         st.subheader("出力フォルダ")
-        st.info("💡 このPCで使用するデフォルトの出力先を選択してください。")
+        st.info("💡 このPCで使用するデフォルトの出力先を選択してください。「推奨」を選ぶとローカルに保存されます。")
 
         # ユーザーのホームディレクトリを取得
         home_dir = os.path.expanduser("~")
 
-        # プリセットオプション
+        # OS別のデフォルトフォルダを取得
+        default_local_folder = get_default_output_folder()
+
+        # プリセットオプション（推奨をトップに）
         preset_paths = {
-            "デフォルト (output)": "output",
-            "ホーム": home_dir,
-            "デスクトップ": os.path.join(home_dir, "Desktop"),
+            "推奨（ローカル保存）": default_local_folder,
             "ドキュメント": os.path.join(home_dir, "Documents"),
+            "デスクトップ": os.path.join(home_dir, "Desktop"),
             "ダウンロード": os.path.join(home_dir, "Downloads"),
+            "ホーム": home_dir,
+            "相対パス (output)": "output",
             "カスタム入力": "_custom_",
         }
 
