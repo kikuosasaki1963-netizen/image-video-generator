@@ -108,9 +108,14 @@ class ImageGenerator:
 
         Returns:
             パース済みのプロンプト一覧
+
+        対応形式:
+        1. [番号] 開始時間-終了時間 | プロンプト
+        2. 【画像生成プロンプト】の後にプロンプトが続く形式
         """
         prompt_list = ImagePromptList(filename=filename)
 
+        # まず標準形式を試す
         for line in content.split("\n"):
             line = line.strip()
             if not line:
@@ -127,6 +132,83 @@ class ImageGenerator:
                 prompt=match.group(4).strip(),
             )
             prompt_list.prompts.append(prompt)
+
+        # 標準形式で見つからなかった場合、【画像生成プロンプト】形式を試す
+        if len(prompt_list.prompts) == 0:
+            prompt_list = self._parse_slide_format(content, filename)
+
+        return prompt_list
+
+    def _parse_slide_format(self, content: str, filename: str) -> ImagePromptList:
+        """【画像生成プロンプト】形式のファイルを解析
+
+        形式例:
+        1. タイトル
+        【画像生成プロンプト】
+        プロンプト内容...
+        """
+        prompt_list = ImagePromptList(filename=filename)
+        lines = content.split("\n")
+
+        current_number = 0
+        in_prompt_section = False
+        current_prompt_lines = []
+
+        for line in lines:
+            line_stripped = line.strip()
+
+            # 番号付きセクションの検出 (1. xxx, 2. xxx, etc.)
+            number_match = re.match(r'^(\d+)\.\s*', line_stripped)
+            if number_match:
+                # 前のプロンプトを保存
+                if current_number > 0 and current_prompt_lines:
+                    prompt_text = " ".join(current_prompt_lines).strip()
+                    if prompt_text:
+                        interval = 10  # 10秒/画像
+                        start_sec = (current_number - 1) * interval
+                        end_sec = current_number * interval
+                        prompt = ImagePrompt(
+                            number=current_number,
+                            start_time=f"{start_sec // 60}:{start_sec % 60:02d}",
+                            end_time=f"{end_sec // 60}:{end_sec % 60:02d}",
+                            prompt=prompt_text,
+                        )
+                        prompt_list.prompts.append(prompt)
+
+                current_number = int(number_match.group(1))
+                in_prompt_section = False
+                current_prompt_lines = []
+                continue
+
+            # 【画像生成プロンプト】セクションの開始
+            if "【画像生成プロンプト】" in line_stripped:
+                in_prompt_section = True
+                current_prompt_lines = []
+                continue
+
+            # 他のセクションマーカーでプロンプトセクション終了
+            if line_stripped.startswith("【") and "】" in line_stripped:
+                in_prompt_section = False
+                continue
+
+            # プロンプトセクション内のテキストを収集
+            if in_prompt_section and line_stripped:
+                current_prompt_lines.append(line_stripped)
+
+        # 最後のプロンプトを保存
+        if current_number > 0 and current_prompt_lines:
+            prompt_text = " ".join(current_prompt_lines).strip()
+            if prompt_text:
+                interval = 10
+                start_sec = (current_number - 1) * interval
+                end_sec = current_number * interval
+                prompt = ImagePrompt(
+                    number=current_number,
+                    start_time=f"{start_sec // 60}:{start_sec % 60:02d}",
+                    end_time=f"{end_sec // 60}:{end_sec % 60:02d}",
+                    prompt=prompt_text,
+                )
+                prompt_list.prompts.append(prompt)
 
         return prompt_list
 

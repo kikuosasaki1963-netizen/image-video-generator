@@ -216,6 +216,7 @@ class TTSClient:
             expressive_prompt = f"Say: {text}"
 
             # Pro モデルを優先（クォータ別枠）、失敗時はFlashモデル
+            # 注: APIモデル名は "preview" 付き
             models_to_try = ["gemini-2.5-pro-preview-tts", "gemini-2.5-flash-preview-tts"]
             last_error = None
 
@@ -253,7 +254,9 @@ class TTSClient:
 
             # レスポンスの検証
             if not response.candidates or not response.candidates[0].content:
-                raise TTSError("Gemini TTS: レスポンスが空です")
+                # 空レスポンスはレート制限の可能性が高い - リトライ可能なエラーとして扱う
+                logger.warning("Gemini TTS: レスポンスが空（レート制限の可能性）")
+                raise TTSError("Gemini TTS: レスポンスが空です（レート制限の可能性）", is_quota_error=False)
             if not response.candidates[0].content.parts:
                 raise TTSError("Gemini TTS: 音声データがありません")
 
@@ -391,9 +394,10 @@ class TTSClient:
                     wav_path = self._synthesize_gemini(line.text, line.speaker, individual_path)
                     gemini_success = True
                     generated_files.append(wav_path)
-                    # 成功した場合、レート制限を避けるため待機（RPM=10なので6秒以上必要）
+                    # 成功した場合、レート制限を避けるため待機
+                    # RPM制限（1分あたり10リクエスト程度）を考慮して6秒待機
                     if i < total_lines - 1:
-                        time.sleep(7.0)  # 7秒待機（1分に約8-9リクエスト、RPM=10以内）
+                        time.sleep(6.0)  # 6秒待機（1分10リクエスト、安全マージン）
                     break
                 except TTSError as e:
                     last_error = e

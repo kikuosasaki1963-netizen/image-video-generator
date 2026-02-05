@@ -140,8 +140,10 @@ def generate_image_prompts_from_script(script, num_images: int):
     import streamlit as st
 
     api_key = get_env_var("GOOGLE_API_KEY")
+    use_ai_generation = bool(api_key)
+
     if not api_key:
-        raise ValueError("GOOGLE_API_KEY が設定されていません")
+        st.warning("⚠️ GOOGLE_API_KEY が未設定のため、簡易プロンプトを使用します")
 
     # ゼロ除算防止: 入力値の検証
     if num_images <= 0:
@@ -156,18 +158,20 @@ def generate_image_prompts_from_script(script, num_images: int):
     total_lines = max(1, script.total_lines)  # 0除算防止
     total_duration = total_lines * estimated_seconds_per_line
 
-    try:
-        import google.genai as genai
+    # APIキーがある場合のみAI生成を試行
+    if use_ai_generation:
+        try:
+            import google.genai as genai
 
-        client = genai.Client(api_key=api_key)
+            client = genai.Client(api_key=api_key)
 
-        # 台本の全テキストを結合
-        script_text = "\n".join([
-            f"{line.number}. [{line.speaker}]: {line.text}"
-            for line in script.lines
-        ])
+            # 台本の全テキストを結合
+            script_text = "\n".join([
+                f"{line.number}. [{line.speaker}]: {line.text}"
+                for line in script.lines
+            ])
 
-        prompt = f"""以下の台本を分析して、{num_images}枚の画像生成プロンプトを作成してください。
+            prompt = f"""以下の台本を分析して、{num_images}枚の画像生成プロンプトを作成してください。
 
 【台本】
 {script_text}
@@ -191,26 +195,26 @@ def generate_image_prompts_from_script(script, num_images: int):
 - 台本の内容に合った適切なシーンを描写する
 """
 
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=prompt,
-        )
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=prompt,
+            )
 
-        # レスポンスをパース
-        from src.image.generator import ImageGenerator
-        generator = ImageGenerator()
-        result_text = response.text
+            # レスポンスをパース
+            from src.image.generator import ImageGenerator
+            generator = ImageGenerator()
+            result_text = response.text
 
-        prompt_list = generator.parse_prompt_text(result_text, "auto_generated")
+            prompt_list = generator.parse_prompt_text(result_text, "auto_generated")
 
-        if prompt_list.total_images > 0:
-            return prompt_list
+            if prompt_list.total_images > 0:
+                return prompt_list
 
-        # パースに失敗した場合はフォールバックへ
-        st.warning(f"⚠️ AIレスポンスのパースに失敗。フォールバックを使用します。")
+            # パースに失敗した場合はフォールバックへ
+            st.warning(f"⚠️ AIレスポンスのパースに失敗。フォールバックを使用します。")
 
-    except Exception as e:
-        st.warning(f"⚠️ AI生成エラー: {e}。フォールバックを使用します。")
+        except Exception as e:
+            st.warning(f"⚠️ AI生成エラー: {e}。フォールバックを使用します。")
 
     # フォールバック: 台本から直接プロンプトを構築
     # ゼロ除算を防止
@@ -352,7 +356,12 @@ def get_existing_output_folders() -> list[tuple[str, str]]:
         output_folder = st.session_state.custom_output_folder
     else:
         settings = load_settings()
-        output_folder = settings.get("defaults", {}).get("output_folder", "output")
+        configured_folder = settings.get("defaults", {}).get("output_folder", "")
+        # 設定が "output"（相対パス）または空の場合は、OS別デフォルトを使用
+        if not configured_folder or configured_folder == "output":
+            output_folder = get_default_output_folder()
+        else:
+            output_folder = configured_folder
 
     output_path = Path(output_folder)
 
@@ -453,7 +462,12 @@ def get_history_file_path() -> Path:
         output_folder = st.session_state.custom_output_folder
     else:
         settings = load_settings()
-        output_folder = settings.get("defaults", {}).get("output_folder", "output")
+        configured_folder = settings.get("defaults", {}).get("output_folder", "")
+        # 設定が "output"（相対パス）または空の場合は、OS別デフォルトを使用
+        if not configured_folder or configured_folder == "output":
+            output_folder = get_default_output_folder()
+        else:
+            output_folder = configured_folder
 
     history_path = Path(output_folder) / "generation_history.json"
 
@@ -991,13 +1005,18 @@ def main_page() -> None:
             st.info(f"📊 項番号が検出されませんでした。行数を使用: {detected_items}")
 
         # 画像枚数の設定
+        # セッションに保存された値があれば使用、なければ検出値を使用
+        default_num_images = st.session_state.get("user_specified_num_images", min(detected_items, 100))
         num_images = st.number_input(
             "生成する画像の枚数",
             min_value=1,
             max_value=100,
-            value=min(detected_items, 100),
-            help=f"台本から{detected_items}項を検出しました。必要に応じて調整してください。"
+            value=default_num_images,
+            help=f"台本から{detected_items}項を検出しました。必要に応じて調整してください。",
+            key="num_images_input"
         )
+        # ユーザーが指定した枚数をセッションに保存（生成時に使用）
+        st.session_state["user_specified_num_images"] = num_images
 
         if st.button("🎨 台本から画像プロンプトを自動生成", type="primary"):
             with st.spinner("AIが台本を分析して画像プロンプトを生成中..."):
@@ -1202,13 +1221,28 @@ def main_page() -> None:
                 status = "✅ 設定済み" if is_set else "❌ 未設定"
                 st.text(f"{name}: {status}")
 
+        # 生成する素材の選択
+        st.subheader("🎯 生成する素材を選択")
+        col_audio, col_image = st.columns(2)
+        with col_audio:
+            generate_audio = st.checkbox("🎤 音声を生成", value=True, key="generate_audio_checkbox")
+        with col_image:
+            generate_images = st.checkbox("🖼️ 画像を生成", value=True, key="generate_images_checkbox")
+
+        if not generate_audio and not generate_images:
+            st.warning("⚠️ 少なくとも1つの素材を選択してください")
+
+        st.divider()
+
         if st.button("🚀 生成を開始", type="primary", use_container_width=True):
-            if not all(api_status.values()):
+            if not generate_audio and not generate_images:
+                st.error("❌ 少なくとも1つの素材を選択してください")
+            elif not all(api_status.values()):
                 st.warning("⚠️ 一部のAPIキーが未設定です。設定ページで設定してください。")
             elif mode == "自動モード（完成動画出力）" and not output_formats:
                 st.error("❌ 出力形式を1つ以上選択してください")
             else:
-                run_generation(script, prompts, mode, output_formats)
+                run_generation(script, prompts, mode, output_formats, generate_audio, generate_images)
 
     # STEP 5: 結果ダウンロード
     st.header("STEP 5: 結果ダウンロード")
@@ -1274,14 +1308,25 @@ def main_page() -> None:
         st.info("📥 生成が完了すると、ここにダウンロードリンクが表示されます。")
 
 
-def run_generation(script, prompts, mode: str, output_formats: list) -> None:
-    """生成処理を実行"""
+def run_generation(script, prompts, mode: str, output_formats: list, generate_audio: bool = True, generate_images: bool = True) -> None:
+    """生成処理を実行
+
+    Args:
+        generate_audio: 音声を生成するかどうか
+        generate_images: 画像を生成するかどうか
+    """
     progress = st.progress(0)
     status = st.empty()
 
     # デバッグ: 選択されたモードを表示
+    materials_info = []
+    if generate_audio:
+        materials_info.append("音声")
+    if generate_images:
+        materials_info.append("画像")
+
     if "Filmora" in mode:
-        st.info(f"📂 **Filmoraモード**で実行中（素材のみ出力）")
+        st.info(f"📂 **Filmoraモード**で実行中（素材のみ出力）- 生成対象: {', '.join(materials_info)}")
     else:
         st.info(f"🎬 **自動モード**で実行中（動画を生成します）: {output_formats}")
 
@@ -1346,21 +1391,24 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
         audio_dir = output_dir / "audio"
         audio_dir.mkdir(exist_ok=True)
 
+        if not generate_audio:
+            st.info("⏭️ 音声生成をスキップしました")
+            progress.progress(0.25)
         # 再利用モードのチェック
-        if st.session_state.reuse_mode["enabled"] and st.session_state.reuse_mode["audio_files"]:
+        elif st.session_state.reuse_mode["enabled"] and st.session_state.reuse_mode["audio_files"]:
             status.text("♻️ 既存の音声を使用中...")
             st.session_state.audio_files = st.session_state.reuse_mode["audio_files"]
             st.success(f"♻️ 既存の音声ファイルを再利用: {len(st.session_state.audio_files)}件")
         elif not st.session_state.audio_files:
             # セリフ数に基づく警告
             total_lines = len(script.lines) if script.lines else 0
-            estimated_time = total_lines * 8  # 約8秒/セリフ（7秒待機 + 処理）
+            estimated_time = total_lines * 7  # 約7秒/セリフ（6秒待機 + 処理）
             estimated_minutes = estimated_time // 60
 
             status.text("🎤 音声を生成中...")
             if total_lines > 50:
                 st.warning(f"⚠️ セリフ数: {total_lines}行（Gemini TTS 1日上限: 50〜100回）")
-                st.info(f"💡 予想所要時間: 約{estimated_minutes}分（レート制限対策のため各セリフ間に7秒待機）")
+                st.info(f"💡 予想所要時間: 約{estimated_minutes}分（レート制限対策のため各セリフ間に6秒待機）")
             elif total_lines > 10:
                 st.info(f"💡 セリフ数: {total_lines}行、予想所要時間: 約{estimated_minutes}分")
 
@@ -1371,7 +1419,7 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
                     # 一括生成モード
                     def update_progress(current, total, message):
                         progress.progress((current + 1) / (total * 4))
-                        status.text(f"🎤 生成中: {current + 1}/{total} - {message}（7秒待機中...）")
+                        status.text(f"🎤 生成中: {current + 1}/{total} - {message}（6秒待機中...）")
 
                     output_path = audio_dir / "full_audio.wav"
                     # allow_fallback=False: クォータ超過時は機械音声にフォールバックせず停止
@@ -1432,88 +1480,100 @@ def run_generation(script, prompts, mode: str, output_formats: list) -> None:
         reused_count = 0
         generated_count = 0
 
-        # 再利用モードの場合、既存の画像を先に読み込む
-        if st.session_state.reuse_mode["enabled"] and st.session_state.reuse_mode["images"]:
-            status.text("♻️ 既存の画像を確認中...")
-            generated_images = dict(st.session_state.reuse_mode["images"])
-            reused_count = len(generated_images)
-            st.info(f"♻️ 既存の画像: {reused_count}枚を再利用予定")
-
-        # 画像プロンプトがない場合は自動生成
-        if prompts.total_images == 0:
-            # 台本から項数を検出して画像枚数を決定（生コンテンツから）
-            raw_content = st.session_state.get("script_raw_content", "")
-            if raw_content:
-                detected_items = count_script_items_from_content(raw_content)
-            else:
-                detected_items = count_script_items(script)
-
-            if detected_items == 0:
-                detected_items = script.total_lines
-
-            # ゼロ除算防止: 最低1枚は生成
-            if detected_items <= 0:
-                detected_items = max(1, len(script.lines) if script.lines else 1)
-
-            calculated_images = max(1, min(detected_items, 100))
-            st.info(f"🎨 {calculated_images}件の画像プロンプトを自動生成中（検出された項数: {detected_items}）...")
-            try:
-                auto_prompts = generate_image_prompts_from_script(script, calculated_images)
-                prompts = auto_prompts
-                st.session_state.prompts = auto_prompts
-                st.success(f"✅ {prompts.total_images}件の画像プロンプトを自動生成しました")
-            except Exception as auto_err:
-                st.warning(f"⚠️ 画像プロンプト自動生成エラー: {auto_err}")
-                st.info("💡 手動で画像プロンプトファイルをアップロードしてください")
-
-        # 画像生成（プロンプトがある場合のみ）
-        if prompts.total_images > 0:
-            # 不足している画像を特定
-            missing_prompts = [p for p in prompts.prompts if p.number not in generated_images]
-
-            if missing_prompts:
-                st.info(f"🖼️ 不足している画像: {len(missing_prompts)}枚を新規生成します...")
-                image_gen = ImageGenerator()
-                image_dir = output_dir / "images"
-                image_dir.mkdir(exist_ok=True)
-                stock_client = StockVideoClient()
-
-                for i, p in enumerate(missing_prompts):
-                    try:
-                        status.text(f"🖼️ 画像生成中: {i + 1}/{len(missing_prompts)} - {p.prompt[:30]}...")
-                        output_path = image_dir / f"{p.number:03d}_scene.png"
-                        image_gen.generate(p.prompt, output_path)
-                        generated_images[p.number] = str(output_path)
-                        generated_count += 1
-                        st.success(f"✅ 画像 {p.number} 生成完了")
-                    except Exception as img_err:
-                        st.warning(f"⚠️ AI画像生成エラー（画像 {p.number}）: {img_err}")
-                        # AI生成失敗時はPexelsからストック画像を取得
-                        try:
-                            status.text(f"🖼️ ストック画像を検索中: {i + 1}/{len(missing_prompts)}")
-                            stock_path = image_dir / f"{p.number:03d}_stock.jpg"
-                            # プロンプトからキーワードを抽出して検索
-                            keywords = p.prompt.split()[:3]  # 最初の3単語をキーワードに
-                            search_query = " ".join(keywords) if keywords else "background"
-                            stock_client.download_image(search_query, stock_path)
-                            generated_images[p.number] = str(stock_path)
-                            generated_count += 1
-                            st.info(f"📷 画像 {p.number}: ストック画像を使用")
-                        except Exception as stock_err:
-                            st.warning(f"⚠️ ストック画像取得エラー（画像 {p.number}）: {stock_err}")
-                    progress.progress(0.25 + (i + 1) / (len(missing_prompts) * 4))
-            else:
-                st.success(f"♻️ 全ての画像が既存のものを再利用できます（{reused_count}枚）")
-
-            # 画像生成結果サマリー
-            if generated_images:
-                st.success(f"✅ 画像準備完了: 再利用 {reused_count}枚 + 新規生成 {generated_count}枚 = 合計 {len(generated_images)}枚")
-            else:
-                st.error("❌ 画像を生成できませんでした")
+        if not generate_images:
+            st.info("⏭️ 画像生成をスキップしました")
+            progress.progress(0.5)
         else:
-            st.error("❌ 画像プロンプトがないため、画像生成をスキップしました")
+            # 再利用モードの場合、既存の画像を先に読み込む
+            if st.session_state.reuse_mode["enabled"] and st.session_state.reuse_mode["images"]:
+                status.text("♻️ 既存の画像を確認中...")
+                generated_images = dict(st.session_state.reuse_mode["images"])
+                reused_count = len(generated_images)
+                st.info(f"♻️ 既存の画像: {reused_count}枚を再利用予定")
 
-        progress.progress(0.5)
+            # 画像プロンプトがない場合、またはユーザー指定枚数が多い場合は自動生成
+            user_specified = st.session_state.get("user_specified_num_images", 0)
+            should_regenerate = prompts.total_images == 0 or (user_specified > 0 and user_specified > prompts.total_images)
+
+            if should_regenerate:
+                if user_specified > 0:
+                    # ユーザー指定があればそれを使用
+                    calculated_images = user_specified
+                    st.info(f"🎨 {calculated_images}件の画像プロンプトを自動生成中（ユーザー指定）...")
+                else:
+                    # 台本から項数を検出して画像枚数を決定（生コンテンツから）
+                    raw_content = st.session_state.get("script_raw_content", "")
+                    if raw_content:
+                        detected_items = count_script_items_from_content(raw_content)
+                    else:
+                        detected_items = count_script_items(script)
+
+                    if detected_items == 0:
+                        detected_items = script.total_lines
+
+                    # ゼロ除算防止: 最低1枚は生成
+                    if detected_items <= 0:
+                        detected_items = max(1, len(script.lines) if script.lines else 1)
+
+                    calculated_images = max(1, min(detected_items, 100))
+                    st.info(f"🎨 {calculated_images}件の画像プロンプトを自動生成中（検出された項数: {detected_items}）...")
+                try:
+                    auto_prompts = generate_image_prompts_from_script(script, calculated_images)
+                    prompts = auto_prompts
+                    st.session_state.prompts = auto_prompts
+                    st.success(f"✅ {prompts.total_images}件の画像プロンプトを自動生成しました")
+                except Exception as auto_err:
+                    st.warning(f"⚠️ 画像プロンプト自動生成エラー: {auto_err}")
+                    st.info("💡 手動で画像プロンプトファイルをアップロードしてください")
+
+            # 画像生成（プロンプトがある場合のみ）
+            if prompts.total_images > 0:
+                # 不足している画像を特定
+                missing_prompts = [p for p in prompts.prompts if p.number not in generated_images]
+
+                if missing_prompts:
+                    st.info(f"🖼️ 不足している画像: {len(missing_prompts)}枚を新規生成します...")
+                    image_gen = ImageGenerator()
+                    image_dir = output_dir / "images"
+                    image_dir.mkdir(exist_ok=True)
+                    stock_client = StockVideoClient()
+
+                    for i, p in enumerate(missing_prompts):
+                        try:
+                            status.text(f"🖼️ 画像生成中: {i + 1}/{len(missing_prompts)} - {p.prompt[:30]}...")
+                            output_path = image_dir / f"{p.number:03d}_scene.png"
+                            image_gen.generate(p.prompt, output_path)
+                            generated_images[p.number] = str(output_path)
+                            generated_count += 1
+                            st.success(f"✅ 画像 {p.number} 生成完了")
+                        except Exception as img_err:
+                            st.warning(f"⚠️ AI画像生成エラー（画像 {p.number}）: {img_err}")
+                            # AI生成失敗時はPexelsからストック画像を取得
+                            try:
+                                status.text(f"🖼️ ストック画像を検索中: {i + 1}/{len(missing_prompts)}")
+                                stock_path = image_dir / f"{p.number:03d}_stock.jpg"
+                                # プロンプトからキーワードを抽出して検索
+                                keywords = p.prompt.split()[:3]  # 最初の3単語をキーワードに
+                                search_query = " ".join(keywords) if keywords else "background"
+                                stock_client.download_image(search_query, stock_path)
+                                generated_images[p.number] = str(stock_path)
+                                generated_count += 1
+                                st.info(f"📷 画像 {p.number}: ストック画像を使用")
+                            except Exception as stock_err:
+                                st.warning(f"⚠️ ストック画像取得エラー（画像 {p.number}）: {stock_err}")
+                        progress.progress(0.25 + (i + 1) / (len(missing_prompts) * 4))
+                else:
+                    st.success(f"♻️ 全ての画像が既存のものを再利用できます（{reused_count}枚）")
+
+                # 画像生成結果サマリー
+                if generated_images:
+                    st.success(f"✅ 画像準備完了: 再利用 {reused_count}枚 + 新規生成 {generated_count}枚 = 合計 {len(generated_images)}枚")
+                else:
+                    st.error("❌ 画像を生成できませんでした")
+            else:
+                st.error("❌ 画像プロンプトがないため、画像生成をスキップしました")
+
+            progress.progress(0.5)
 
         # 履歴更新: 画像生成完了
         if history_entry:
