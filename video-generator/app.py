@@ -934,7 +934,6 @@ def main_page() -> None:
             st.success(f"✅ {script_file.name} をアップロードしました")
             # 生のコンテンツを保存（項数検出用）
             if script_file.name.lower().endswith(".docx"):
-                from io import BytesIO
                 from docx import Document
                 doc = Document(BytesIO(script_file.getvalue()))
                 st.session_state.script_raw_content = "\n".join(para.text for para in doc.paragraphs)
