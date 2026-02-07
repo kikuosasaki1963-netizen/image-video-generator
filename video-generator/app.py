@@ -1754,7 +1754,8 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
                 src_file = Path(src_path)
                 if src_file.exists():
                     dst_file = audio_dir / src_file.name
-                    shutil.copy2(src_file, dst_file)
+                    if src_file.resolve() != dst_file.resolve():
+                        shutil.copy2(src_file, dst_file)
                     copied_audio[key] = str(dst_file)
 
             st.session_state.audio_files = copied_audio
@@ -1939,7 +1940,8 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
                         src_file = Path(src_path)
                         if src_file.exists():
                             dst_file = image_dir / src_file.name
-                            shutil.copy2(src_file, dst_file)
+                            if src_file.resolve() != dst_file.resolve():
+                                shutil.copy2(src_file, dst_file)
                             generated_images[num] = str(dst_file)
                         else:
                             generated_images[num] = src_path  # 元のパスを保持
@@ -2060,7 +2062,8 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
                         src_file = Path(src_path)
                         if src_file.exists():
                             dst_file = video_dir / src_file.name
-                            shutil.copy2(src_file, dst_file)
+                            if src_file.resolve() != dst_file.resolve():
+                                shutil.copy2(src_file, dst_file)
                             background_videos[num] = str(dst_file)
                             reused_video_count += 1
 
@@ -2132,7 +2135,8 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
                     src_bgm = Path(st.session_state.reuse_mode["bgm"])
                     if src_bgm.exists():
                         dst_bgm = bgm_dir / src_bgm.name
-                        shutil.copy2(src_bgm, dst_bgm)
+                        if src_bgm.resolve() != dst_bgm.resolve():
+                            shutil.copy2(src_bgm, dst_bgm)
                         bgm_path = dst_bgm
                         st.success(f"♻️ 既存のBGMファイルをコピー: {bgm_path.name}")
             else:
@@ -2142,7 +2146,8 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
                     src_bgm = Path(st.session_state.reuse_mode["bgm"])
                     if src_bgm.exists():
                         dst_bgm = bgm_dir / src_bgm.name
-                        shutil.copy2(src_bgm, dst_bgm)
+                        if src_bgm.resolve() != dst_bgm.resolve():
+                            shutil.copy2(src_bgm, dst_bgm)
                         bgm_path = dst_bgm
                         st.success(f"♻️ 既存のBGMファイルをコピー: {bgm_path.name}")
                     else:
