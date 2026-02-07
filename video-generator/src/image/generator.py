@@ -112,8 +112,12 @@ class ImageGenerator:
         対応形式:
         1. [番号] 開始時間-終了時間 | プロンプト
         2. 【画像生成プロンプト】の後にプロンプトが続く形式
+        3. 番号. プロンプト（シンプルなリスト形式）
+        4. 番号: プロンプト（コロン区切り形式）
         """
         prompt_list = ImagePromptList(filename=filename)
+
+        logger.info(f"プロンプトファイルをパース中: {filename}, 文字数: {len(content)}")
 
         # まず標準形式を試す
         for line in content.split("\n"):
@@ -133,16 +137,71 @@ class ImageGenerator:
             )
             prompt_list.prompts.append(prompt)
 
-        # 標準形式で見つからなかった場合、【画像生成プロンプト】形式を試す
-        if len(prompt_list.prompts) == 0:
-            prompt_list = self._parse_slide_format(content, filename)
+        if len(prompt_list.prompts) > 0:
+            logger.info(f"標準形式で {len(prompt_list.prompts)} 件のプロンプトを検出")
+            return prompt_list
+
+        # 【画像生成プロンプト】形式を試す
+        prompt_list = self._parse_slide_format(content, filename)
+        if len(prompt_list.prompts) > 0:
+            logger.info(f"スライド形式で {len(prompt_list.prompts)} 件のプロンプトを検出")
+            return prompt_list
+
+        # シンプルな番号付きリスト形式を試す（例: "1. プロンプト" または "1: プロンプト"）
+        prompt_list = self._parse_simple_numbered_list(content, filename)
+        if len(prompt_list.prompts) > 0:
+            logger.info(f"シンプルリスト形式で {len(prompt_list.prompts)} 件のプロンプトを検出")
+            return prompt_list
+
+        logger.warning(f"プロンプトを検出できませんでした: {filename}")
+        return ImagePromptList(filename=filename)
+
+    def _parse_simple_numbered_list(
+        self, content: str, filename: str
+    ) -> ImagePromptList:
+        """シンプルな番号付きリスト形式を解析
+
+        対応形式:
+        - 1. プロンプト内容
+        - 1: プロンプト内容
+        - 1） プロンプト内容
+        - 1) プロンプト内容
+        """
+        prompt_list = ImagePromptList(filename=filename)
+
+        # 番号付きリストのパターン（様々な区切り文字に対応）
+        simple_pattern = re.compile(r'^(\d+)[\.:\)）]\s*(.+)', re.MULTILINE)
+
+        for match in simple_pattern.finditer(content):
+            number = int(match.group(1))
+            prompt_text = match.group(2).strip()
+
+            # 最低限の長さがあるプロンプトのみ採用
+            if len(prompt_text) >= 5:
+                interval = 10
+                start_sec = (number - 1) * interval
+                end_sec = number * interval
+                prompt = ImagePrompt(
+                    number=number,
+                    start_time=f"{start_sec // 60}:{start_sec % 60:02d}",
+                    end_time=f"{end_sec // 60}:{end_sec % 60:02d}",
+                    prompt=prompt_text,
+                )
+                prompt_list.prompts.append(prompt)
+
+        # 番号順にソート
+        prompt_list.prompts.sort(key=lambda p: p.number)
 
         return prompt_list
 
     def _parse_slide_format(self, content: str, filename: str) -> ImagePromptList:
         """【画像生成プロンプト】形式のファイルを解析
 
-        形式例:
+        形式例1（同じ行にプロンプト）:
+        1. タイトル
+        【画像生成プロンプト】 プロンプト内容...
+
+        形式例2（次の行にプロンプト）:
         1. タイトル
         【画像生成プロンプト】
         プロンプト内容...
@@ -180,10 +239,14 @@ class ImageGenerator:
                 current_prompt_lines = []
                 continue
 
-            # 【画像生成プロンプト】セクションの開始
+            # 【画像生成プロンプト】セクションの開始（同じ行にプロンプトがある場合も対応）
             if "【画像生成プロンプト】" in line_stripped:
                 in_prompt_section = True
                 current_prompt_lines = []
+                # 同じ行に【画像生成プロンプト】の後にテキストがある場合
+                after_marker = line_stripped.split("【画像生成プロンプト】", 1)[-1].strip()
+                if after_marker:
+                    current_prompt_lines.append(after_marker)
                 continue
 
             # 他のセクションマーカーでプロンプトセクション終了
@@ -278,6 +341,11 @@ class ImageGenerator:
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
             # レスポンスから画像データを取得
+            if response is None or response.parts is None:
+                # 安全フィルターやレート制限でレスポンスが空の場合
+                block_reason = getattr(getattr(response, "prompt_feedback", None), "block_reason", None) if response else None
+                raise ImageGenerationError(f"APIから空のレスポンスが返されました（block_reason={block_reason}）")
+
             image_parts = [part for part in response.parts if hasattr(part, 'inline_data') and part.inline_data]
 
             if image_parts:

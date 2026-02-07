@@ -353,91 +353,90 @@ class TTSClient:
         progress_callback: callable | None = None,
         allow_fallback: bool = False,
     ) -> Path:
-        """各セリフを順番に生成して結合（Gemini TTS使用・感情表現あり）
-
-        Args:
-            progress_callback: 進捗を報告するコールバック関数 (current, total, message) -> None
-            allow_fallback: Trueの場合、クォータ超過時にCloud TTSにフォールバック。
-                           Falseの場合、クォータ超過時にエラーを発生させて生成を停止。
-
-        Note:
-            中断時も途中まで生成されたファイルを保持するため、
-            一時ディレクトリではなく出力ディレクトリに直接保存します。
-        """
+        """Gemini TTSで台本を音声化（レート制限対策強化版）"""
         import time
+
+        # 設定
+        WAIT_BETWEEN_REQUESTS = 12.0  # リクエスト間の待機時間（秒）- 安全マージン確保
+        MAX_RETRIES = 5  # 最大リトライ回数
+        RETRY_BASE_WAIT = 30.0  # リトライ時の基本待機時間（秒）
 
         output_path = Path(output_path)
         audio_dir = output_path.parent
         audio_dir.mkdir(parents=True, exist_ok=True)
 
         total_lines = len(script.lines)
-        logger.info("台本音声合成開始（Gemini TTS）: %d行, フォールバック許可: %s", total_lines, allow_fallback)
+        estimated_time = total_lines * (WAIT_BETWEEN_REQUESTS + 2)  # 推定所要時間
+        logger.info(f"台本音声合成開始: {total_lines}行, 推定時間: {estimated_time/60:.1f}分")
 
-        # 出力ディレクトリに直接各セリフの音声を生成（中断時も保持される）
         generated_files = []
+        skipped_count = 0
 
         for i, line in enumerate(script.lines):
-            # 個別ファイルを出力ディレクトリに直接保存
             individual_path = audio_dir / f"{line.number:03d}_{line.speaker}.wav"
 
-            # 進捗をコールバックで報告
+            # 既存ファイルをスキップ（途中再開対応）
+            if individual_path.exists() and individual_path.stat().st_size > 0:
+                logger.info(f"セリフ {i + 1}/{total_lines}: 既存ファイルをスキップ - {individual_path.name}")
+                generated_files.append(individual_path)
+                skipped_count += 1
+                if progress_callback:
+                    progress_callback(i, total_lines, f"スキップ（既存）")
+                continue
+
             if progress_callback:
-                progress_callback(i, total_lines, f"{line.speaker} (Gemini TTS)")
+                remaining = (total_lines - i - skipped_count) * WAIT_BETWEEN_REQUESTS / 60
+                progress_callback(i, total_lines, f"{line.speaker}（残り約{remaining:.0f}分）")
 
-            # Gemini TTS（感情表現あり）を試行
-            logger.info("セリフ %d/%d を生成中（Gemini TTS）: %s", i + 1, total_lines, line.speaker)
-            gemini_success = False
-            last_error = None
+            logger.info(f"セリフ {i + 1}/{total_lines}: {line.speaker}")
 
-            for retry in range(3):  # 最大3回リトライ
+            # リトライループ
+            for retry in range(MAX_RETRIES):
                 try:
                     wav_path = self._synthesize_gemini(line.text, line.speaker, individual_path)
-                    gemini_success = True
                     generated_files.append(wav_path)
-                    # 成功した場合、レート制限を避けるため待機
-                    # RPM制限（1分あたり10リクエスト程度）を考慮して6秒待機
+
+                    # 次のリクエストまで待機（最後以外）
                     if i < total_lines - 1:
-                        time.sleep(6.0)  # 6秒待機（1分10リクエスト、安全マージン）
+                        time.sleep(WAIT_BETWEEN_REQUESTS)
                     break
+
                 except TTSError as e:
-                    last_error = e
-                    if e.is_quota_error:
-                        if allow_fallback:
-                            # フォールバック許可: Cloud TTSを使用
-                            logger.warning("Gemini TTS クォータ超過 - Cloud TTSにフォールバック（セリフ %d）", i + 1)
-                            break
+                    if e.is_quota_error and not allow_fallback:
+                        # クォータ超過：長めに待機してリトライ
+                        wait_time = RETRY_BASE_WAIT * (retry + 1)  # 30秒、60秒、90秒...
+                        if retry < MAX_RETRIES - 1:
+                            logger.warning(f"レート制限検出 - {wait_time}秒待機後リトライ ({retry + 1}/{MAX_RETRIES})")
+                            time.sleep(wait_time)
                         else:
-                            # フォールバック不許可: エラーを発生させて停止
-                            # 途中まで生成されたファイルは保持される
-                            error_msg = f"Gemini TTS クォータ超過（セリフ {i + 1}/{total_lines}）。生成済み: {len(generated_files)}件。クォータがリセットされるまでお待ちください。"
+                            # 最終リトライも失敗
+                            error_msg = f"Gemini TTS レート制限（セリフ {i + 1}/{total_lines}）。生成済み: {len(generated_files)}件"
                             logger.error(error_msg)
                             raise TTSError(error_msg, original_error=e, is_quota_error=True)
+                    elif e.is_quota_error and allow_fallback:
+                        # フォールバック許可時
+                        logger.warning(f"Cloud TTSにフォールバック（セリフ {i + 1}）")
+                        wav_path = self._synthesize_cloud(line.text, line.speaker, individual_path)
+                        generated_files.append(wav_path)
+                        break
                     else:
-                        # 一時的なエラー: リトライ（レート制限対策で長めに待機）
-                        wait_time = 10.0 * (retry + 1)  # 10秒、20秒、30秒
-                        logger.warning(f"Gemini TTS エラー（リトライ {retry + 1}/3、{wait_time}秒待機）: {e.message}")
-                        time.sleep(wait_time)
+                        # その他のエラー
+                        wait_time = RETRY_BASE_WAIT * (retry + 1)
+                        if retry < MAX_RETRIES - 1:
+                            logger.warning(f"TTS エラー - {wait_time}秒待機後リトライ: {e.message}")
+                            time.sleep(wait_time)
+                        else:
+                            raise TTSError(f"音声生成失敗（セリフ {i + 1}）: {e.message}", original_error=e)
+
                 except Exception as e:
-                    last_error = e
-                    wait_time = 10.0 * (retry + 1)
-                    logger.warning(f"Gemini TTS 予期しないエラー（リトライ {retry + 1}/3、{wait_time}秒待機）: {e}")
-                    time.sleep(wait_time)
+                    wait_time = RETRY_BASE_WAIT * (retry + 1)
+                    if retry < MAX_RETRIES - 1:
+                        logger.warning(f"予期しないエラー - {wait_time}秒待機後リトライ: {e}")
+                        time.sleep(wait_time)
+                    else:
+                        raise TTSError(f"音声生成失敗（セリフ {i + 1}）: {e}")
 
-            # Gemini TTSが失敗した場合
-            if not gemini_success:
-                if allow_fallback:
-                    # フォールバック許可: Cloud TTSを使用
-                    logger.warning(f"Gemini TTS 失敗 - Cloud TTSにフォールバック（セリフ {i + 1}）")
-                    wav_path = self._synthesize_cloud(line.text, line.speaker, individual_path)
-                    generated_files.append(wav_path)
-                else:
-                    # フォールバック不許可: エラーを発生させて停止
-                    # 途中まで生成されたファイルは保持される
-                    error_msg = f"Gemini TTS 音声生成失敗（セリフ {i + 1}/{total_lines}）。生成済み: {len(generated_files)}件。エラー: {last_error}"
-                    logger.error(error_msg)
-                    raise TTSError(error_msg, original_error=last_error)
-
-        # 全セグメントを結合して full_audio.wav を作成
+        # 音声ファイルを結合
         audio_segments = []
         for wav_file in generated_files:
             with wave.open(str(wav_file), "rb") as wf:
@@ -451,5 +450,5 @@ class TTSClient:
             for segment in audio_segments:
                 wf.writeframes(segment)
 
-        logger.info("台本音声合成完了: %s（個別ファイル: %d件）", full_audio_path, len(generated_files))
+        logger.info(f"台本音声合成完了: {len(generated_files)}件")
         return full_audio_path

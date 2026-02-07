@@ -1,9 +1,13 @@
-"""Beatoven.ai BGM生成クライアント"""
+"""BGMクライアント（ロイヤリティフリー音源使用）"""
 
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
+from urllib.parse import urljoin
+
+import requests
 
 from src.utils.config import get_env_var, load_settings
 from src.utils.exceptions import BGMGenerationError, ConfigurationError
@@ -15,19 +19,47 @@ logger = logging.getLogger(__name__)
 MAX_RETRIES = 3
 BASE_DELAY = 2.0
 
+# ロイヤリティフリーBGMのプリセット（Pixabay Music からの直接URL）
+# これらは Creative Commons ライセンスで利用可能
+PRESET_BGM_URLS = [
+    {
+        "name": "Ambient Corporate",
+        "duration": 120,
+        "mood": "neutral",
+        "url": "https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3",
+    },
+    {
+        "name": "Inspiring Cinematic",
+        "duration": 180,
+        "mood": "uplifting",
+        "url": "https://cdn.pixabay.com/download/audio/2022/10/25/audio_946b0939c5.mp3",
+    },
+    {
+        "name": "Soft Background",
+        "duration": 150,
+        "mood": "calm",
+        "url": "https://cdn.pixabay.com/download/audio/2022/03/15/audio_8cb749d484.mp3",
+    },
+    {
+        "name": "Documentary Style",
+        "duration": 200,
+        "mood": "serious",
+        "url": "https://cdn.pixabay.com/download/audio/2021/11/25/audio_91b32e02f9.mp3",
+    },
+    {
+        "name": "Light and Happy",
+        "duration": 140,
+        "mood": "happy",
+        "url": "https://cdn.pixabay.com/download/audio/2022/01/18/audio_d0a13f69d2.mp3",
+    },
+]
+
 
 class BeatovenClient:
-    """Beatoven.ai クライアント"""
+    """BGM取得クライアント（プリセット音源使用）"""
 
     def __init__(self) -> None:
-        self._client = None
         self._settings = load_settings()
-
-    def _get_client(self):
-        """クライアントを遅延初期化"""
-        # 注意: Beatoven.ai公式SDKは存在しないため、この機能は一時的に無効化
-        logger.warning("Beatoven.ai SDKは現在利用できません。BGM生成はスキップされます。")
-        return None
 
     def generate(
         self,
@@ -35,74 +67,93 @@ class BeatovenClient:
         output_path: str | Path,
         mood: str | None = None,
         genre: str | None = None,
-    ) -> Path:
-        """BGMを生成
+    ) -> Path | None:
+        """BGMをダウンロード
 
         Args:
-            duration: 長さ（秒）
+            duration: 希望の長さ（秒）- 目安として使用
             output_path: 出力ファイルパス
-            mood: ムード（neutral, happy, sad, etc.）
-            genre: ジャンル
+            mood: ムード（neutral, happy, calm, etc.）
+            genre: ジャンル（未使用）
 
         Returns:
-            出力ファイルのパス
-
-        Raises:
-            BGMGenerationError: BGM生成に失敗した場合
-            ConfigurationError: APIキーが設定されていない場合
+            出力ファイルのパス（失敗時はNone）
         """
-        return self._generate_with_retry(duration, output_path, mood, genre)
+        return self._download_bgm(duration, output_path, mood)
 
     @with_retry(max_retries=MAX_RETRIES, base_delay=BASE_DELAY)
-    def _generate_with_retry(
+    def _download_bgm(
         self,
         duration: int,
         output_path: str | Path,
         mood: str | None = None,
-        genre: str | None = None,
     ) -> Path | None:
-        """リトライ付きBGM生成（内部メソッド）"""
+        """プリセットからBGMをダウンロード"""
         try:
-            client = self._get_client()
-
-            # クライアントが利用できない場合はスキップ
-            if client is None:
-                logger.warning("BGM生成をスキップしました（Beatoven.ai SDKが利用できません）")
-                return None
-
             defaults = self._settings.get("defaults", {}).get("bgm", {})
 
             if mood is None:
                 mood = defaults.get("mood", "neutral")
-            if genre is None:
-                genre = defaults.get("genre", "background")
 
-            logger.debug(
-                "BGM生成開始: duration=%d, mood=%s, genre=%s",
-                duration,
-                mood,
-                genre,
+            logger.info("BGM検索開始: mood=%s, duration=%d秒", mood, duration)
+
+            # ムードに最も合う曲を選択
+            best_match = None
+            best_score = -1
+
+            for preset in PRESET_BGM_URLS:
+                score = 0
+
+                # ムードが一致すれば高スコア
+                if preset["mood"] == mood:
+                    score += 10
+                elif preset["mood"] == "neutral":
+                    score += 5
+
+                # durationに近いほど高スコア
+                duration_diff = abs(preset["duration"] - duration)
+                if duration_diff < 30:
+                    score += 5
+                elif duration_diff < 60:
+                    score += 3
+                elif duration_diff < 120:
+                    score += 1
+
+                if score > best_score:
+                    best_score = score
+                    best_match = preset
+
+            if not best_match:
+                best_match = PRESET_BGM_URLS[0]
+
+            logger.info(
+                "BGMダウンロード開始: %s (長さ: %d秒)",
+                best_match["name"],
+                best_match["duration"],
             )
 
-            # Beatoven API呼び出し
-            track = client.create_track(
-                duration=duration,
-                mood=mood,
-                genre=genre,
-            )
+            # ファイルをダウンロード
+            response = requests.get(best_match["url"], timeout=60)
+            response.raise_for_status()
 
             output_path = Path(output_path)
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # トラックをダウンロード
-            track.download(str(output_path))
+            # 拡張子をmp3に設定
+            if output_path.suffix.lower() != ".mp3":
+                output_path = output_path.with_suffix(".mp3")
 
-            logger.info("BGM生成完了: %s", output_path)
+            with open(output_path, "wb") as f:
+                f.write(response.content)
+
+            logger.info("BGMダウンロード完了: %s", output_path)
             return output_path
 
-        except ConfigurationError:
-            raise
+        except requests.RequestException as e:
+            error_msg = f"BGMダウンロードに失敗しました: {e}"
+            logger.error(error_msg)
+            raise BGMGenerationError(error_msg, original_error=e)
         except Exception as e:
-            error_msg = f"BGM生成に失敗しました（duration: {duration}秒）: {e}"
+            error_msg = f"BGM取得中にエラー: {e}"
             logger.error(error_msg)
             raise BGMGenerationError(error_msg, original_error=e)

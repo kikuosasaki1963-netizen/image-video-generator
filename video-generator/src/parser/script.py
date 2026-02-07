@@ -45,6 +45,9 @@ class ScriptParser:
     # 読み仮名パターン: {漢字|読み} など
     READING_PATTERN = re.compile(r"\{([^|]+)\|([^}]+)\}")
 
+    # タイムスタンプ・章見出しパターン: 【2:30】 失敗のメカニズム解説① など
+    TIMESTAMP_SECTION_PATTERN = re.compile(r"\s*【[^】]*】.*$")
+
     # 話者パターン: speaker1:, Speaker 1:, speaker 2: など（スペースあり/なし対応）
     SPEAKER_PATTERN = re.compile(r"^(speaker\s*\d+):\s*(.+)$", re.IGNORECASE)
     # 話者のみのパターン（次の行にテキストがある場合）
@@ -166,6 +169,13 @@ class ScriptParser:
             # 読み仮名を展開（{漢字|読み} → 読み）
             final_text = self.READING_PATTERN.sub(r"\2", clean_text)
 
+            # タイムスタンプ・章見出しを除去（TTS用テキストのみ）
+            final_text = self.TIMESTAMP_SECTION_PATTERN.sub("", final_text).strip()
+
+            if not final_text:
+                line_number -= 1
+                continue
+
             line = Line(
                 number=line_number,
                 speaker=speaker,
@@ -230,6 +240,13 @@ class ScriptParser:
 
             # 読み仮名を展開
             final_text = self.READING_PATTERN.sub(r"\2", clean_text)
+
+            # タイムスタンプ・章見出しを除去（TTS用テキストのみ）
+            final_text = self.TIMESTAMP_SECTION_PATTERN.sub("", final_text).strip()
+
+            if not final_text:
+                line_number -= 1
+                continue
 
             line = Line(
                 number=line_number,
