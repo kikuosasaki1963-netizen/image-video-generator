@@ -450,5 +450,13 @@ class TTSClient:
             for segment in audio_segments:
                 wf.writeframes(segment)
 
+        # 結合後、個別ファイルを削除（full_audio.wavのみ残す）
+        for wav_file in generated_files:
+            if Path(wav_file).resolve() != full_audio_path.resolve():
+                try:
+                    Path(wav_file).unlink()
+                except OSError:
+                    pass
+
         logger.info(f"台本音声合成完了: {len(generated_files)}件")
         return full_audio_path
