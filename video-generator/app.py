@@ -1117,14 +1117,12 @@ def main_page() -> None:
                 from docx import Document
                 doc = Document(BytesIO(prompt_file.getvalue()))
                 file_content = "\n".join(para.text for para in doc.paragraphs)
-                prompt_file.seek(0)  # ファイルポインタをリセット
             else:
                 file_content = prompt_file.getvalue().decode("utf-8")
-                prompt_file.seek(0)
 
-            # プロンプトをパース
+            # プロンプトをパース（既に読み取ったfile_contentを直接渡す）
             generator = ImageGenerator()
-            parsed_prompts = generator.parse_uploaded_file(prompt_file)
+            parsed_prompts = generator.parse_prompt_text(file_content, prompt_file.name)
             st.session_state.prompts = parsed_prompts
 
             # パース結果をすぐに表示（デバッグ用）
