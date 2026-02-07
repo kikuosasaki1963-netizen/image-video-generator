@@ -1730,6 +1730,14 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
 
             add_history_entry(history_entry)
 
+        # 中断耐性: Streamlit例外が発生しても残りのステップを続行する
+        _pending_streamlit_exception = None
+
+        def _is_streamlit_exception(exc: BaseException) -> bool:
+            """Streamlitの内部例外かどうかを判定"""
+            exc_name = type(exc).__name__
+            return "Rerun" in exc_name or "StopException" in exc_name or "Stop" == exc_name
+
         # ステップ1: 音声生成
         audio_mode = st.session_state.get("audio_mode", "batch")
         audio_error_occurred = False
@@ -1866,7 +1874,9 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
                         wav_path = tts.synthesize(line.text, line.speaker, output_path)
                         st.session_state.audio_files[line.number] = str(wav_path)
                         progress.progress((i + 1) / (script.total_lines * 4))
-            except Exception as audio_err:
+            except BaseException as audio_err:
+                if _is_streamlit_exception(audio_err):
+                    _pending_streamlit_exception = audio_err
                 audio_error_occurred = True
                 error_str = str(audio_err)
 
@@ -2034,9 +2044,12 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
                     st.error("❌ 画像プロンプトがないため、画像生成をスキップしました")
 
                 progress.progress(0.5)
-        except Exception as img_err:
-            log_error_to_file(output_dir, "画像生成エラー", str(img_err), traceback.format_exc())
-            st.error(f"❌ 画像生成エラー: {img_err}")
+        except BaseException as img_err:
+            if _is_streamlit_exception(img_err):
+                _pending_streamlit_exception = _pending_streamlit_exception or img_err
+            else:
+                log_error_to_file(output_dir, "画像生成エラー", str(img_err), traceback.format_exc())
+                st.error(f"❌ 画像生成エラー: {img_err}")
             progress.progress(0.5)
 
         # 履歴更新: 画像生成完了
@@ -2116,8 +2129,11 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
                     st.success(f"✅ 背景動画: {len(background_videos)}件準備完了")
                 else:
                     st.info("ℹ️ 背景動画なしで続行します")
-        except Exception as bg_err:
-            log_error_to_file(output_dir, "背景動画取得エラー", str(bg_err), traceback.format_exc())
+        except BaseException as bg_err:
+            if _is_streamlit_exception(bg_err):
+                _pending_streamlit_exception = _pending_streamlit_exception or bg_err
+            else:
+                log_error_to_file(output_dir, "背景動画取得エラー", str(bg_err), traceback.format_exc())
             st.warning(f"⚠️ 背景動画の取得中にエラー: {bg_err}")
 
         progress.progress(0.6)
@@ -2199,9 +2215,12 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
                         log_error_to_file(output_dir, "BGM生成エラー", str(bgm_err), traceback.format_exc())
                         st.warning(f"⚠️ BGM生成に失敗（スキップ）: {bgm_err}")
                         bgm_path = None
-        except Exception as bgm_step_err:
-            log_error_to_file(output_dir, "BGMステップエラー", str(bgm_step_err), traceback.format_exc())
-            st.error(f"❌ BGMステップでエラー: {bgm_step_err}")
+        except BaseException as bgm_step_err:
+            if _is_streamlit_exception(bgm_step_err):
+                _pending_streamlit_exception = _pending_streamlit_exception or bgm_step_err
+            else:
+                log_error_to_file(output_dir, "BGMステップエラー", str(bgm_step_err), traceback.format_exc())
+                st.error(f"❌ BGMステップでエラー: {bgm_step_err}")
 
         progress.progress(0.75)
 
@@ -2458,6 +2477,14 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
                     log_error_to_file(output_dir, f"動画生成エラー（{fmt}）", str(video_err), traceback.format_exc())
                     st.error(f"❌ {fmt} 動画生成エラー: {video_err}")
                     st.code(traceback.format_exc())
+
+        # 中断が保留されている場合、ここで再送出（全ステップ完了後）
+        if _pending_streamlit_exception is not None:
+            if history_entry:
+                history_entry["status"] = "interrupted"
+                history_entry["error"] = "一部ステップ中断（残りは続行済み）"
+                add_history_entry(history_entry)
+            raise _pending_streamlit_exception
 
         progress.progress(1.0)
         status.text("✅ 生成完了！")
