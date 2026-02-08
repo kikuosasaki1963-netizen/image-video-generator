@@ -920,8 +920,10 @@ def main_page() -> None:
                     with col2:
                         folder_path = Path(entry.get("output_dir", ""))
                         if folder_path.exists():
-                            if st.button("📂 開く", key=f"open_{entry['id']}"):
-                                st.info(f"出力フォルダ: {folder_path}")
+                            if st.button("📥 DL", key=f"open_{entry['id']}", help="ダウンロード"):
+                                st.session_state[f"show_dl_{entry['id']}"] = True
+                        else:
+                            st.caption("📁 ファイルなし")
                     with col3:
                         # エラーログ表示ボタン
                         error_log_path = folder_path / "error_log.txt"
@@ -934,6 +936,25 @@ def main_page() -> None:
                         if st.button("🗑️", key=f"del_comp_{entry['id']}", help="この履歴を削除"):
                             delete_history_entry(entry["id"])
                             st.rerun()
+
+                    # ダウンロードパネル展開
+                    if st.session_state.get(f"show_dl_{entry['id']}") and folder_path.exists():
+                        dl_files = sorted([f for f in folder_path.rglob("*") if f.is_file() and f.name != "error_log.txt"])
+                        if dl_files:
+                            dl_cols_count = min(4, len(dl_files))
+                            for fi, f in enumerate(dl_files):
+                                f_mb = f.stat().st_size / (1024 * 1024)
+                                size_label = f"{f_mb:.0f}MB" if f_mb >= 1 else f"{f_mb * 1024:.0f}KB"
+                                rel_path = f.relative_to(folder_path)
+                                st.download_button(
+                                    label=f"📥 {rel_path} ({size_label})",
+                                    data=f.read_bytes(),
+                                    file_name=f.name,
+                                    mime="application/octet-stream",
+                                    key=f"hdl_{entry['id']}_{fi}",
+                                )
+                        else:
+                            st.caption("ダウンロード可能なファイルがありません")
 
             # 全削除ボタン
             st.divider()
