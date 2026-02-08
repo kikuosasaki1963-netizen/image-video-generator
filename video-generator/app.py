@@ -2052,19 +2052,46 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
                     status.text("🎥 背景動画を検索中...")
                     stock_client = StockVideoClient()
 
+                    # 日本語→英語キーワードマッピング（Pexels/Pixabayは英語検索が必要）
+                    _jp_to_en = {
+                        "不動産": "real estate", "投資": "investment", "マンション": "apartment building",
+                        "金利": "interest rate", "経済": "economy", "お金": "money finance",
+                        "株": "stock market", "ビジネス": "business office", "会議": "meeting",
+                        "グラフ": "chart graph", "上昇": "growth arrow", "下降": "decline",
+                        "都市": "city skyline", "建物": "building architecture", "家": "house home",
+                        "人": "people", "女性": "woman", "男性": "man", "笑顔": "smile happy",
+                        "驚": "surprised", "怒": "angry", "悲": "sad", "喜": "happy celebration",
+                        "炎": "fire flame", "水": "water ocean", "空": "sky clouds",
+                        "夜": "night city", "朝": "morning sunrise", "自然": "nature landscape",
+                        "テクノロジー": "technology", "コンピュータ": "computer", "データ": "data digital",
+                        "選挙": "election voting", "政治": "politics government", "ニュース": "news broadcast",
+                        "食事": "food dining", "料理": "cooking kitchen", "スーパー": "supermarket shopping",
+                        "工場": "factory industrial", "半導体": "semiconductor technology",
+                        "インフレ": "inflation economy", "価格": "price tag", "給料": "salary paycheck",
+                    }
+
+                    def _to_english_query(text: str) -> str:
+                        """日本語プロンプトから英語検索クエリを生成"""
+                        matches = []
+                        for jp, en in _jp_to_en.items():
+                            if jp in text:
+                                matches.append(en)
+                        if matches:
+                            return " ".join(matches[:3])
+                        # マッチしない場合は汎用キーワード
+                        return "abstract background motion"
+
                     # プロンプトがある場合はプロンプトから、なければ台本から検索
                     if prompts.prompts:
-                        search_items = [(p.number, p.prompt.split()[:3]) for p in prompts.prompts]
+                        search_items = [(p.number, _to_english_query(p.prompt)) for p in prompts.prompts]
                     elif script and script.lines:
-                        # 台本からキーワードを抽出（最大10件）
-                        search_items = [(i + 1, line.text.split()[:3]) for i, line in enumerate(script.lines[:10])]
+                        search_items = [(i + 1, _to_english_query(line.text)) for i, line in enumerate(script.lines[:10])]
                     else:
-                        search_items = [(1, ["abstract", "background"])]
+                        search_items = [(1, "abstract background")]
 
-                    for i, (number, keywords) in enumerate(search_items):
+                    for i, (number, search_query) in enumerate(search_items):
                         try:
                             status.text(f"🎥 背景動画検索中: {i + 1}/{len(search_items)}")
-                            search_query = " ".join(keywords) if keywords else "abstract background"
 
                             # Pexelsで動画を検索
                             videos = stock_client.search_pexels(search_query, per_page=1)
