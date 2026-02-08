@@ -937,7 +937,7 @@ def main_page() -> None:
                             delete_history_entry(entry["id"])
                             st.rerun()
 
-                    # ダウンロードパネル展開（1ファイルずつ選択してメモリ節約）
+                    # ダウンロードパネル展開（準備ボタンで1ファイルだけ読み込み）
                     if st.session_state.get(f"show_dl_{entry['id']}") and folder_path.exists():
                         dl_files = sorted([f for f in folder_path.rglob("*") if f.is_file() and f.name != "error_log.txt"])
                         if dl_files:
@@ -946,21 +946,25 @@ def main_page() -> None:
                                 f_mb = f.stat().st_size / (1024 * 1024)
                                 size_label = f"{f_mb:.0f}MB" if f_mb >= 1 else f"{f_mb * 1024:.0f}KB"
                                 rel_path = f.relative_to(folder_path)
-                                h_file_options[f"{rel_path} ({size_label})"] = f
+                                h_file_options[f"{rel_path} ({size_label})"] = str(f)
                             h_selected = st.selectbox(
                                 "ファイルを選択",
                                 options=list(h_file_options.keys()),
                                 key=f"hsel_{entry['id']}",
                             )
-                            if h_selected:
-                                h_sel_file = h_file_options[h_selected]
-                                st.download_button(
-                                    label="📥 ダウンロード",
-                                    data=h_sel_file.read_bytes(),
-                                    file_name=h_sel_file.name,
-                                    mime="application/octet-stream",
-                                    key=f"hdl_{entry['id']}",
-                                )
+                            h_ready_key = f"hready_{entry['id']}"
+                            if st.button("📦 ダウンロード準備", key=f"hprep_{entry['id']}"):
+                                st.session_state[h_ready_key] = h_file_options.get(h_selected, "")
+                            if st.session_state.get(h_ready_key) and h_selected and h_file_options.get(h_selected) == st.session_state.get(h_ready_key):
+                                h_ready_file = Path(st.session_state[h_ready_key])
+                                if h_ready_file.exists():
+                                    st.download_button(
+                                        label="📥 ダウンロード",
+                                        data=h_ready_file.read_bytes(),
+                                        file_name=h_ready_file.name,
+                                        mime="application/octet-stream",
+                                        key=f"hdl_{entry['id']}",
+                                    )
                         else:
                             st.caption("ダウンロード可能なファイルがありません")
 
@@ -1646,22 +1650,26 @@ def main_page() -> None:
                                 key=f"dl_{folder_name}",
                             )
                         else:
-                            # 大容量: 1ファイルずつ選択してダウンロード（メモリ節約）
-                            file_options = {f"{f.name} ({f.stat().st_size / (1024*1024):.0f}MB)": f for f in files}
+                            # 大容量: 選択→準備→ダウンロードの3段階（メモリ節約）
+                            file_options = {f"{f.name} ({f.stat().st_size / (1024*1024):.0f}MB)": str(f) for f in files}
                             selected = st.selectbox(
                                 f"{label} ({size_mb:.0f}MB) - ファイルを選択",
                                 options=list(file_options.keys()),
                                 key=f"sel_{folder_name}",
                             )
-                            if selected:
-                                selected_file = file_options[selected]
-                                st.download_button(
-                                    label=f"📥 ダウンロード",
-                                    data=selected_file.read_bytes(),
-                                    file_name=selected_file.name,
-                                    mime="application/octet-stream",
-                                    key=f"dl_{folder_name}_sel",
-                                )
+                            ready_key = f"ready_{folder_name}"
+                            if st.button("📦 ダウンロード準備", key=f"prep_{folder_name}"):
+                                st.session_state[ready_key] = file_options.get(selected, "")
+                            if st.session_state.get(ready_key) and selected and file_options.get(selected) == st.session_state.get(ready_key):
+                                ready_file = Path(st.session_state[ready_key])
+                                if ready_file.exists():
+                                    st.download_button(
+                                        label=f"📥 ダウンロード",
+                                        data=ready_file.read_bytes(),
+                                        file_name=ready_file.name,
+                                        mime="application/octet-stream",
+                                        key=f"dl_{folder_name}_sel",
+                                    )
                     else:
                         st.button(f"{label} なし", disabled=True, key=f"dl_{folder_name}")
 
