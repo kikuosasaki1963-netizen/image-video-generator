@@ -1617,9 +1617,17 @@ def main_page() -> None:
                                 key=f"dl_{folder_name}",
                             )
                         else:
-                            folder_path = output_dir / folder_name
-                            st.button(f"{label} ({size_mb:.0f}MB)", disabled=True, key=f"dl_{folder_name}")
-                            st.caption(f"⚠️ 大容量のためフォルダから直接取得してください: `{folder_path}`")
+                            # 大容量: 個別ファイルダウンロードボタンを表示
+                            st.markdown(f"**{label} ({size_mb:.0f}MB)**")
+                            for fi, f in enumerate(files):
+                                f_mb = f.stat().st_size / (1024 * 1024)
+                                st.download_button(
+                                    label=f"📥 {f.name} ({f_mb:.0f}MB)",
+                                    data=f.read_bytes(),
+                                    file_name=f.name,
+                                    mime="application/octet-stream",
+                                    key=f"dl_{folder_name}_{fi}",
+                                )
                     else:
                         st.button(f"{label} なし", disabled=True, key=f"dl_{folder_name}")
 
