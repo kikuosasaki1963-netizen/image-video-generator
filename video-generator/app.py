@@ -937,21 +937,29 @@ def main_page() -> None:
                             delete_history_entry(entry["id"])
                             st.rerun()
 
-                    # ダウンロードパネル展開
+                    # ダウンロードパネル展開（1ファイルずつ選択してメモリ節約）
                     if st.session_state.get(f"show_dl_{entry['id']}") and folder_path.exists():
                         dl_files = sorted([f for f in folder_path.rglob("*") if f.is_file() and f.name != "error_log.txt"])
                         if dl_files:
-                            dl_cols_count = min(4, len(dl_files))
-                            for fi, f in enumerate(dl_files):
+                            h_file_options = {}
+                            for f in dl_files:
                                 f_mb = f.stat().st_size / (1024 * 1024)
                                 size_label = f"{f_mb:.0f}MB" if f_mb >= 1 else f"{f_mb * 1024:.0f}KB"
                                 rel_path = f.relative_to(folder_path)
+                                h_file_options[f"{rel_path} ({size_label})"] = f
+                            h_selected = st.selectbox(
+                                "ファイルを選択",
+                                options=list(h_file_options.keys()),
+                                key=f"hsel_{entry['id']}",
+                            )
+                            if h_selected:
+                                h_sel_file = h_file_options[h_selected]
                                 st.download_button(
-                                    label=f"📥 {rel_path} ({size_label})",
-                                    data=f.read_bytes(),
-                                    file_name=f.name,
+                                    label="📥 ダウンロード",
+                                    data=h_sel_file.read_bytes(),
+                                    file_name=h_sel_file.name,
                                     mime="application/octet-stream",
-                                    key=f"hdl_{entry['id']}_{fi}",
+                                    key=f"hdl_{entry['id']}",
                                 )
                         else:
                             st.caption("ダウンロード可能なファイルがありません")
@@ -1638,16 +1646,21 @@ def main_page() -> None:
                                 key=f"dl_{folder_name}",
                             )
                         else:
-                            # 大容量: 個別ファイルダウンロードボタンを表示
-                            st.markdown(f"**{label} ({size_mb:.0f}MB)**")
-                            for fi, f in enumerate(files):
-                                f_mb = f.stat().st_size / (1024 * 1024)
+                            # 大容量: 1ファイルずつ選択してダウンロード（メモリ節約）
+                            file_options = {f"{f.name} ({f.stat().st_size / (1024*1024):.0f}MB)": f for f in files}
+                            selected = st.selectbox(
+                                f"{label} ({size_mb:.0f}MB) - ファイルを選択",
+                                options=list(file_options.keys()),
+                                key=f"sel_{folder_name}",
+                            )
+                            if selected:
+                                selected_file = file_options[selected]
                                 st.download_button(
-                                    label=f"📥 {f.name} ({f_mb:.0f}MB)",
-                                    data=f.read_bytes(),
-                                    file_name=f.name,
+                                    label=f"📥 ダウンロード",
+                                    data=selected_file.read_bytes(),
+                                    file_name=selected_file.name,
                                     mime="application/octet-stream",
-                                    key=f"dl_{folder_name}_{fi}",
+                                    key=f"dl_{folder_name}_sel",
                                 )
                     else:
                         st.button(f"{label} なし", disabled=True, key=f"dl_{folder_name}")
