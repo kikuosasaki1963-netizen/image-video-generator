@@ -1930,7 +1930,179 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
                 history_entry["files"]["audio_files"] = dict(st.session_state.audio_files)
             add_history_entry(history_entry)
 
-        # ステップ2: 画像生成
+        # ステップ2: BGM生成（画像より先に実行 - タイムアウト対策）
+        bgm_path = None
+        bgm_dir = output_dir / "bgm"
+        bgm_dir.mkdir(exist_ok=True)
+
+        try:
+            if not generate_bgm:
+                st.info("⏭️ BGM生成をスキップしました")
+                # 再利用モードの場合は既存のBGMをコピー
+                if st.session_state.reuse_mode["enabled"] and st.session_state.reuse_mode["bgm"]:
+                    src_bgm = Path(st.session_state.reuse_mode["bgm"])
+                    if src_bgm.exists():
+                        dst_bgm = bgm_dir / src_bgm.name
+                        if src_bgm.resolve() != dst_bgm.resolve():
+                            shutil.copy2(src_bgm, dst_bgm)
+                        bgm_path = dst_bgm
+                        st.success(f"♻️ 既存のBGMファイルをコピー: {bgm_path.name}")
+            else:
+                # 再利用モードのチェック
+                if st.session_state.reuse_mode["enabled"] and st.session_state.reuse_mode["bgm"]:
+                    status.text("♻️ 既存のBGMをコピー中...")
+                    src_bgm = Path(st.session_state.reuse_mode["bgm"])
+                    if src_bgm.exists():
+                        dst_bgm = bgm_dir / src_bgm.name
+                        if src_bgm.resolve() != dst_bgm.resolve():
+                            shutil.copy2(src_bgm, dst_bgm)
+                        bgm_path = dst_bgm
+                        st.success(f"♻️ 既存のBGMファイルをコピー: {bgm_path.name}")
+                    else:
+                        st.warning("⚠️ 既存のBGMファイルが見つかりません。新規生成します。")
+
+                if bgm_path is None:
+                    status.text("🎵 BGMを生成中...")
+
+                    # 動画の長さを計算（優先順位: 音声 > プロンプト > デフォルト）
+                    total_duration = 60  # デフォルト
+
+                    # 音声ファイルから長さを取得
+                    if st.session_state.audio_files:
+                        try:
+                            if "full" in st.session_state.audio_files:
+                                audio_path = st.session_state.audio_files["full"]
+                            else:
+                                # 個別ファイルの合計時間を計算
+                                audio_path = list(st.session_state.audio_files.values())[0]
+
+                            from moviepy import AudioFileClip
+                            clip = AudioFileClip(audio_path)
+                            if "full" in st.session_state.audio_files:
+                                total_duration = clip.duration
+                            else:
+                                # 個別ファイルの場合は推定（各ファイル × 件数）
+                                total_duration = clip.duration * len(st.session_state.audio_files)
+                            clip.close()
+                            st.info(f"🎵 音声から長さを検出: {total_duration:.1f}秒")
+                        except Exception:
+                            pass
+
+                    # 音声がない場合はプロンプトから
+                    if total_duration == 60 and prompts.prompts:
+                        last_prompt = prompts.prompts[-1]
+                        total_duration = time_to_seconds(last_prompt.end_time)
+
+                    bgm_path = bgm_dir / "background_music.mp3"
+                    try:
+                        bgm_client = BeatovenClient()
+                        bgm_client.generate(int(total_duration), bgm_path)
+                        # ファイルが実際に作成されたか確認
+                        if not bgm_path.exists():
+                            st.warning("⚠️ BGMファイルが作成されませんでした（スキップ）")
+                            bgm_path = None
+                        else:
+                            st.success(f"✅ BGM生成完了: {bgm_path.name}")
+                    except Exception as bgm_err:
+                        log_error_to_file(output_dir, "BGM生成エラー", str(bgm_err), traceback.format_exc())
+                        st.warning(f"⚠️ BGM生成に失敗（スキップ）: {bgm_err}")
+                        bgm_path = None
+        except BaseException as bgm_step_err:
+            if _is_streamlit_exception(bgm_step_err):
+                _pending_streamlit_exception = _pending_streamlit_exception or bgm_step_err
+            else:
+                log_error_to_file(output_dir, "BGMステップエラー", str(bgm_step_err), traceback.format_exc())
+                st.error(f"❌ BGMステップでエラー: {bgm_step_err}")
+
+        progress.progress(0.35)
+
+        # 履歴更新: BGM生成完了
+        if history_entry:
+            history_entry["progress"]["bgm_generated"] = True
+            history_entry["files"]["bgm"] = str(bgm_path) if bgm_path else None
+            add_history_entry(history_entry)
+
+        # ステップ3: 背景動画のダウンロード（画像より先に実行 - タイムアウト対策）
+        background_videos = {}
+        try:
+            if not generate_bg_video:
+                st.info("⏭️ 背景動画の取得をスキップしました")
+            else:
+                video_dir = output_dir / "videos" / "backgrounds"
+                video_dir.mkdir(parents=True, exist_ok=True)
+
+                # 再利用モードの場合、既存の動画をコピー
+                reused_video_count = 0
+                if st.session_state.reuse_mode["enabled"] and st.session_state.reuse_mode.get("videos"):
+                    status.text("♻️ 既存の動画をコピー中...")
+                    for num, src_path in st.session_state.reuse_mode["videos"].items():
+                        src_file = Path(src_path)
+                        if src_file.exists():
+                            dst_file = video_dir / src_file.name
+                            if src_file.resolve() != dst_file.resolve():
+                                shutil.copy2(src_file, dst_file)
+                            background_videos[num] = str(dst_file)
+                            reused_video_count += 1
+
+                    if reused_video_count > 0:
+                        st.success(f"♻️ 既存の動画: {reused_video_count}本をコピーしました")
+
+                # 再利用で全て揃っていない場合は新規取得
+                if not background_videos:
+                    status.text("🎥 背景動画を検索中...")
+                    stock_client = StockVideoClient()
+
+                    # プロンプトがある場合はプロンプトから、なければ台本から検索
+                    if prompts.prompts:
+                        search_items = [(p.number, p.prompt.split()[:3]) for p in prompts.prompts]
+                    elif script and script.lines:
+                        # 台本からキーワードを抽出（最大10件）
+                        search_items = [(i + 1, line.text.split()[:3]) for i, line in enumerate(script.lines[:10])]
+                    else:
+                        search_items = [(1, ["abstract", "background"])]
+
+                    for i, (number, keywords) in enumerate(search_items):
+                        try:
+                            status.text(f"🎥 背景動画検索中: {i + 1}/{len(search_items)}")
+                            search_query = " ".join(keywords) if keywords else "abstract background"
+
+                            # Pexelsで動画を検索
+                            videos = stock_client.search_pexels(search_query, per_page=1)
+
+                            if videos:
+                                video_path = video_dir / f"{number:03d}_bg.mp4"
+                                stock_client.download(videos[0], video_path)
+                                background_videos[number] = str(video_path)
+                                st.success(f"✅ 背景動画 {number} ダウンロード完了")
+                            else:
+                                # Pixabayにフォールバック
+                                videos = stock_client.search_pixabay(search_query, per_page=1)
+                                if videos:
+                                    video_path = video_dir / f"{number:03d}_bg.mp4"
+                                    stock_client.download(videos[0], video_path)
+                                    background_videos[number] = str(video_path)
+                                    st.success(f"✅ 背景動画 {number} ダウンロード完了 (Pixabay)")
+
+                        except Exception as vid_err:
+                            log_error_to_file(output_dir, f"背景動画取得エラー（{number}）", str(vid_err), traceback.format_exc())
+                            st.warning(f"⚠️ 背景動画取得エラー（{number}）: {vid_err}")
+
+                        progress.progress(0.35 + (i + 1) / (len(search_items) * 8))
+
+                if background_videos:
+                    st.success(f"✅ 背景動画: {len(background_videos)}件準備完了")
+                else:
+                    st.info("ℹ️ 背景動画なしで続行します")
+        except BaseException as bg_err:
+            if _is_streamlit_exception(bg_err):
+                _pending_streamlit_exception = _pending_streamlit_exception or bg_err
+            else:
+                log_error_to_file(output_dir, "背景動画取得エラー", str(bg_err), traceback.format_exc())
+            st.warning(f"⚠️ 背景動画の取得中にエラー: {bg_err}")
+
+        progress.progress(0.5)
+
+        # ステップ4: 画像生成（最も時間がかかるため最後に実行）
         generated_images = {}
         reused_count = 0
         generated_count = 0
@@ -1938,7 +2110,7 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
         try:  # 画像生成を独立したtry/exceptでラップ
             if not generate_images:
                 st.info("⏭️ 画像生成をスキップしました")
-                progress.progress(0.5)
+                progress.progress(0.75)
             else:
                 # 再利用モードの場合、既存の画像をコピー
                 if st.session_state.reuse_mode["enabled"] and st.session_state.reuse_mode["images"]:
@@ -2027,7 +2199,7 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
                                     generated_count += 1
                                 except Exception as stock_err:
                                     log_error_to_file(output_dir, f"ストック画像取得エラー（画像 {p.number}）", str(stock_err), traceback.format_exc())
-                            progress.progress(0.25 + (i + 1) / (len(missing_prompts) * 4))
+                            progress.progress(0.5 + (i + 1) / (len(missing_prompts) * 4))
 
                         # 画像生成結果をまとめて表示（ループ中のUI更新を最小化）
                         if image_errors:
@@ -2043,14 +2215,14 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
                 else:
                     st.error("❌ 画像プロンプトがないため、画像生成をスキップしました")
 
-                progress.progress(0.5)
+                progress.progress(0.75)
         except BaseException as img_err:
             if _is_streamlit_exception(img_err):
                 _pending_streamlit_exception = _pending_streamlit_exception or img_err
             else:
                 log_error_to_file(output_dir, "画像生成エラー", str(img_err), traceback.format_exc())
                 st.error(f"❌ 画像生成エラー: {img_err}")
-            progress.progress(0.5)
+            progress.progress(0.75)
 
         # 履歴更新: 画像生成完了
         if history_entry:
@@ -2058,179 +2230,7 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
             history_entry["files"]["images"] = {str(k): v for k, v in generated_images.items()}
             add_history_entry(history_entry)
 
-        # ステップ2.5: 背景動画のダウンロード
-        background_videos = {}
-        try:
-            if not generate_bg_video:
-                st.info("⏭️ 背景動画の取得をスキップしました")
-            else:
-                video_dir = output_dir / "videos" / "backgrounds"
-                video_dir.mkdir(parents=True, exist_ok=True)
-
-                # 再利用モードの場合、既存の動画をコピー
-                reused_video_count = 0
-                if st.session_state.reuse_mode["enabled"] and st.session_state.reuse_mode.get("videos"):
-                    status.text("♻️ 既存の動画をコピー中...")
-                    for num, src_path in st.session_state.reuse_mode["videos"].items():
-                        src_file = Path(src_path)
-                        if src_file.exists():
-                            dst_file = video_dir / src_file.name
-                            if src_file.resolve() != dst_file.resolve():
-                                shutil.copy2(src_file, dst_file)
-                            background_videos[num] = str(dst_file)
-                            reused_video_count += 1
-
-                    if reused_video_count > 0:
-                        st.success(f"♻️ 既存の動画: {reused_video_count}本をコピーしました")
-
-                # 再利用で全て揃っていない場合は新規取得
-                if not background_videos:
-                    status.text("🎥 背景動画を検索中...")
-                    stock_client = StockVideoClient()
-
-                    # プロンプトがある場合はプロンプトから、なければ台本から検索
-                    if prompts.prompts:
-                        search_items = [(p.number, p.prompt.split()[:3]) for p in prompts.prompts]
-                    elif script and script.lines:
-                        # 台本からキーワードを抽出（最大10件）
-                        search_items = [(i + 1, line.text.split()[:3]) for i, line in enumerate(script.lines[:10])]
-                    else:
-                        search_items = [(1, ["abstract", "background"])]
-
-                    for i, (number, keywords) in enumerate(search_items):
-                        try:
-                            status.text(f"🎥 背景動画検索中: {i + 1}/{len(search_items)}")
-                            search_query = " ".join(keywords) if keywords else "abstract background"
-
-                            # Pexelsで動画を検索
-                            videos = stock_client.search_pexels(search_query, per_page=1)
-
-                            if videos:
-                                video_path = video_dir / f"{number:03d}_bg.mp4"
-                                stock_client.download(videos[0], video_path)
-                                background_videos[number] = str(video_path)
-                                st.success(f"✅ 背景動画 {number} ダウンロード完了")
-                            else:
-                                # Pixabayにフォールバック
-                                videos = stock_client.search_pixabay(search_query, per_page=1)
-                                if videos:
-                                    video_path = video_dir / f"{number:03d}_bg.mp4"
-                                    stock_client.download(videos[0], video_path)
-                                    background_videos[number] = str(video_path)
-                                    st.success(f"✅ 背景動画 {number} ダウンロード完了 (Pixabay)")
-
-                        except Exception as vid_err:
-                            log_error_to_file(output_dir, f"背景動画取得エラー（{number}）", str(vid_err), traceback.format_exc())
-                            st.warning(f"⚠️ 背景動画取得エラー（{number}）: {vid_err}")
-
-                        progress.progress(0.5 + (i + 1) / (len(search_items) * 8))
-
-                if background_videos:
-                    st.success(f"✅ 背景動画: {len(background_videos)}件準備完了")
-                else:
-                    st.info("ℹ️ 背景動画なしで続行します")
-        except BaseException as bg_err:
-            if _is_streamlit_exception(bg_err):
-                _pending_streamlit_exception = _pending_streamlit_exception or bg_err
-            else:
-                log_error_to_file(output_dir, "背景動画取得エラー", str(bg_err), traceback.format_exc())
-            st.warning(f"⚠️ 背景動画の取得中にエラー: {bg_err}")
-
-        progress.progress(0.6)
-
-        # ステップ3: BGM生成
-        bgm_path = None
-        bgm_dir = output_dir / "bgm"
-        bgm_dir.mkdir(exist_ok=True)
-
-        try:
-            if not generate_bgm:
-                st.info("⏭️ BGM生成をスキップしました")
-                # 再利用モードの場合は既存のBGMをコピー
-                if st.session_state.reuse_mode["enabled"] and st.session_state.reuse_mode["bgm"]:
-                    src_bgm = Path(st.session_state.reuse_mode["bgm"])
-                    if src_bgm.exists():
-                        dst_bgm = bgm_dir / src_bgm.name
-                        if src_bgm.resolve() != dst_bgm.resolve():
-                            shutil.copy2(src_bgm, dst_bgm)
-                        bgm_path = dst_bgm
-                        st.success(f"♻️ 既存のBGMファイルをコピー: {bgm_path.name}")
-            else:
-                # 再利用モードのチェック
-                if st.session_state.reuse_mode["enabled"] and st.session_state.reuse_mode["bgm"]:
-                    status.text("♻️ 既存のBGMをコピー中...")
-                    src_bgm = Path(st.session_state.reuse_mode["bgm"])
-                    if src_bgm.exists():
-                        dst_bgm = bgm_dir / src_bgm.name
-                        if src_bgm.resolve() != dst_bgm.resolve():
-                            shutil.copy2(src_bgm, dst_bgm)
-                        bgm_path = dst_bgm
-                        st.success(f"♻️ 既存のBGMファイルをコピー: {bgm_path.name}")
-                    else:
-                        st.warning("⚠️ 既存のBGMファイルが見つかりません。新規生成します。")
-
-                if bgm_path is None:
-                    status.text("🎵 BGMを生成中...")
-
-                    # 動画の長さを計算（優先順位: 音声 > プロンプト > デフォルト）
-                    total_duration = 60  # デフォルト
-
-                    # 音声ファイルから長さを取得
-                    if st.session_state.audio_files:
-                        try:
-                            if "full" in st.session_state.audio_files:
-                                audio_path = st.session_state.audio_files["full"]
-                            else:
-                                # 個別ファイルの合計時間を計算
-                                audio_path = list(st.session_state.audio_files.values())[0]
-
-                            from moviepy import AudioFileClip
-                            clip = AudioFileClip(audio_path)
-                            if "full" in st.session_state.audio_files:
-                                total_duration = clip.duration
-                            else:
-                                # 個別ファイルの場合は推定（各ファイル × 件数）
-                                total_duration = clip.duration * len(st.session_state.audio_files)
-                            clip.close()
-                            st.info(f"🎵 音声から長さを検出: {total_duration:.1f}秒")
-                        except Exception:
-                            pass
-
-                    # 音声がない場合はプロンプトから
-                    if total_duration == 60 and prompts.prompts:
-                        last_prompt = prompts.prompts[-1]
-                        total_duration = time_to_seconds(last_prompt.end_time)
-
-                    bgm_path = bgm_dir / "background_music.mp3"
-                    try:
-                        bgm_client = BeatovenClient()
-                        bgm_client.generate(int(total_duration), bgm_path)
-                        # ファイルが実際に作成されたか確認
-                        if not bgm_path.exists():
-                            st.warning("⚠️ BGMファイルが作成されませんでした（スキップ）")
-                            bgm_path = None
-                        else:
-                            st.success(f"✅ BGM生成完了: {bgm_path.name}")
-                    except Exception as bgm_err:
-                        log_error_to_file(output_dir, "BGM生成エラー", str(bgm_err), traceback.format_exc())
-                        st.warning(f"⚠️ BGM生成に失敗（スキップ）: {bgm_err}")
-                        bgm_path = None
-        except BaseException as bgm_step_err:
-            if _is_streamlit_exception(bgm_step_err):
-                _pending_streamlit_exception = _pending_streamlit_exception or bgm_step_err
-            else:
-                log_error_to_file(output_dir, "BGMステップエラー", str(bgm_step_err), traceback.format_exc())
-                st.error(f"❌ BGMステップでエラー: {bgm_step_err}")
-
-        progress.progress(0.75)
-
-        # 履歴更新: BGM生成完了
-        if history_entry:
-            history_entry["progress"]["bgm_generated"] = True
-            history_entry["files"]["bgm"] = str(bgm_path) if bgm_path else None
-            add_history_entry(history_entry)
-
-        # ステップ4: Filmoraモードの場合はタイムライン生成
+        # ステップ5: Filmoraモードの場合はタイムライン生成
         if "Filmora" in mode:
             status.text("📋 タイムラインを生成中...")
             timeline = Timeline()
