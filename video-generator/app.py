@@ -1120,6 +1120,9 @@ def main_page() -> None:
             else:
                 file_content = prompt_file.getvalue().decode("utf-8")
 
+            # プロンプトファイルの生コンテンツを保存（チャプター検出用）
+            st.session_state.prompt_raw_content = file_content
+
             # プロンプトをパース（既に読み取ったfile_contentを直接渡す）
             generator = ImageGenerator()
             parsed_prompts = generator.parse_prompt_text(file_content, prompt_file.name)
@@ -2081,11 +2084,27 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
                         # マッチしない場合は汎用キーワード
                         return "abstract background motion"
 
-                    # プロンプトがある場合はプロンプトから、なければ台本から検索
-                    if prompts.prompts:
-                        search_items = [(p.number, _to_english_query(p.prompt)) for p in prompts.prompts]
+                    # チャプター（話題の切り替わり）を検出して、チャプターごとに1本の背景動画を取得
+                    import re as _re
+                    chapter_pattern = _re.compile(r'【[\d:]+〜\s*(.+?)】')
+
+                    # 台本またはプロンプトファイルからチャプターヘッダーを検出
+                    raw_content = st.session_state.get("prompt_raw_content", "") or st.session_state.get("script_raw_content", "")
+                    chapters = chapter_pattern.findall(raw_content)
+
+                    if chapters:
+                        # チャプターごとに1本（例: "オープニング：低金利の甘い罠" → 英語検索）
+                        search_items = [(i + 1, _to_english_query(ch)) for i, ch in enumerate(chapters)]
+                        st.info(f"📑 {len(chapters)}個のチャプターを検出 → チャプターごとに背景動画を取得")
+                    elif prompts.prompts:
+                        # チャプター未検出時はプロンプトから最大5本に制限
+                        step = max(1, len(prompts.prompts) // 5)
+                        selected = prompts.prompts[::step][:5]
+                        search_items = [(p.number, _to_english_query(p.prompt)) for p in selected]
                     elif script and script.lines:
-                        search_items = [(i + 1, _to_english_query(line.text)) for i, line in enumerate(script.lines[:10])]
+                        step = max(1, len(script.lines) // 5)
+                        selected = script.lines[::step][:5]
+                        search_items = [(i + 1, _to_english_query(line.text)) for i, line in enumerate(selected)]
                     else:
                         search_items = [(1, "abstract background")]
 
