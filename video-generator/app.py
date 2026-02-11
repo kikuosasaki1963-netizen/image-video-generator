@@ -795,6 +795,10 @@ def main_page() -> None:
     # 出力フォルダを早期に初期化（履歴読み込みに必要）
     if "custom_output_folder" not in st.session_state:
         st.session_state.custom_output_folder = get_default_output_folder()
+    if "pronunciation_suggestions" not in st.session_state:
+        st.session_state.pronunciation_suggestions = []
+    if "step_mode" not in st.session_state:
+        st.session_state.step_mode = True
 
     # 履歴セクション（常に表示）
     with st.expander("📜 生成履歴", expanded=True):
@@ -1135,6 +1139,33 @@ def main_page() -> None:
             parser = ScriptParser()
             st.session_state.script = parser.parse_uploaded_file(script_file)
 
+            # 読み確認を自動実行（high/medium を自動適用）
+            try:
+                from src.audio.pronunciation import apply_suggestions, check_pronunciation
+
+                full_text = "\n".join(
+                    line.text for line in st.session_state.script.lines
+                )
+                suggestions = check_pronunciation(full_text)
+                if suggestions:
+                    auto_indices = [
+                        i for i, s in enumerate(suggestions)
+                        if s.confidence in ("high", "medium")
+                    ]
+                    if auto_indices:
+                        apply_suggestions(
+                            st.session_state.script.lines,
+                            suggestions,
+                            auto_indices,
+                        )
+                    # low confidence は手動確認用に残す
+                    remaining = [
+                        s for s in suggestions if s.confidence == "low"
+                    ]
+                    st.session_state.pronunciation_suggestions = remaining
+            except Exception as pron_err:
+                st.warning(f"⚠️ 読み自動チェック: {pron_err}")
+
     with col2:
         st.subheader("🖼️ 画像プロンプトファイル")
         prompt_file = st.file_uploader(
@@ -1205,6 +1236,33 @@ def main_page() -> None:
         - `(...)` 形式の情景補足は自動除去されます
         - `{漢字|読み}` 形式で読み仮名を指定できます
         """)
+
+        # 読み確認（自動適用済み + 残りの低確信度候補）
+        st.divider()
+        st.markdown("🔍 **読み確認**: high/medium 確信度の修正は台本アップロード時に自動適用済みです。")
+
+        if st.session_state.pronunciation_suggestions:
+            suggestions = st.session_state.pronunciation_suggestions
+            st.markdown(f"**確認が必要な候補: {len(suggestions)}件**（低確信度）")
+
+            selected = []
+            for i, s in enumerate(suggestions):
+                conf_icon = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(s.confidence, "⚪")
+                checked = st.checkbox(
+                    f"{conf_icon} [{s.confidence}] {s.original} → {s.notation}",
+                    value=False,
+                    key=f"pron_{i}",
+                )
+                if checked:
+                    selected.append(i)
+
+            if selected and st.button("✅ 選択した修正を適用", key="apply_pronunciation_btn"):
+                from src.audio.pronunciation import apply_suggestions
+
+                apply_suggestions(script.lines, suggestions, selected)
+                st.session_state.pronunciation_suggestions = []
+                st.success(f"✅ {len(selected)}件の修正を台本に適用しました")
+                st.rerun()
 
     # 画像プロンプト自動生成オプション
     if script and not st.session_state.prompts:
@@ -1514,32 +1572,145 @@ def main_page() -> None:
                 status = "✅ 設定済み" if is_set else "❌ 未設定"
                 st.text(f"{name}: {status}")
 
-        # 生成する素材の選択
-        st.subheader("🎯 生成する素材を選択")
-        col_audio, col_image, col_bgm, col_bg_video = st.columns(4)
-        with col_audio:
-            generate_audio = st.checkbox("🎤 音声", value=True, key="generate_audio_checkbox")
-        with col_image:
-            generate_images = st.checkbox("🖼️ 画像", value=True, key="generate_images_checkbox")
-        with col_bgm:
-            generate_bgm = st.checkbox("🎵 BGM", value=True, key="generate_bgm_checkbox")
-        with col_bg_video:
-            generate_bg_video = st.checkbox("🎬 背景動画", value=True, key="generate_bg_video_checkbox")
+        # 生成モード切替
+        st.subheader("🔧 生成モード")
+        step_mode = st.toggle(
+            "ステップモード（推奨: 中断防止）",
+            value=st.session_state.step_mode,
+            help="ONにすると各ステップを個別ボタンで実行。メモリ解放が行われ中断を防止します。",
+            key="step_mode_toggle",
+        )
+        st.session_state.step_mode = step_mode
 
-        if not generate_audio and not generate_images and not generate_bgm and not generate_bg_video:
-            st.warning("⚠️ 少なくとも1つの素材を選択してください")
+        if step_mode:
+            # ステップモード: 個別ボタンUI
+            st.markdown("各ステップを個別に実行できます。完了後にメモリが解放されます。")
 
-        st.divider()
+            # 出力ディレクトリ準備
+            if not st.session_state.output_dir:
+                st.session_state.output_dir = get_output_dir()
+            step_output_dir = Path(st.session_state.output_dir)
 
-        if st.button("🚀 生成を開始", type="primary", use_container_width=True):
+            # ステップ状態検出
+            step_status = detect_step_status(step_output_dir)
+
+            # 履歴エントリ準備
+            step_history = None
+            try:
+                step_history = _get_or_create_history_entry(step_output_dir)
+                step_history["settings"]["output_mode"] = mode
+                step_history["settings"]["output_formats"] = output_formats
+                add_history_entry(step_history)
+            except Exception:
+                pass
+
+            # 台本・プロンプトを保存
+            if step_history:
+                step_history["progress"]["script_parsed"] = True
+                script_file = save_script_to_output(script, step_output_dir)
+                if script_file:
+                    step_history["files"]["script_file"] = str(script_file)
+                if prompts:
+                    prompts_file = save_prompts_to_output(prompts, step_output_dir)
+                    if prompts_file:
+                        step_history["files"]["prompts_file"] = str(prompts_file)
+                add_history_entry(step_history)
+
+            # STEP 1: 音声
+            s1_icon = "✅" if step_status["audio"] else "⬜"
+            audio_count = len(list((step_output_dir / "audio").glob("*.wav"))) if (step_output_dir / "audio").exists() else 0
+            st.markdown(f"### {s1_icon} STEP 1: 音声生成 ({audio_count}件)")
+            s1_col1, s1_col2 = st.columns([3, 1])
+            with s1_col2:
+                s1_label = "🔄 再生成" if step_status["audio"] else "▶️ 生成開始"
+                if st.button(s1_label, key="step_audio_btn", use_container_width=True):
+                    run_step_audio(script, step_output_dir, step_history)
+                    st.rerun()
+
+            # STEP 2: BGM
+            s2_icon = "✅" if step_status["bgm"] else "⬜"
+            st.markdown(f"### {s2_icon} STEP 2: BGM生成")
+            s2_col1, s2_col2 = st.columns([3, 1])
+            with s2_col2:
+                s2_label = "🔄 再生成" if step_status["bgm"] else "▶️ 生成開始"
+                if st.button(s2_label, key="step_bgm_btn", use_container_width=True):
+                    run_step_bgm(script, prompts, step_output_dir, step_history)
+                    st.rerun()
+
+            # STEP 3: 背景動画
+            s3_icon = "✅" if step_status["bg_video"] else "⬜"
+            st.markdown(f"### {s3_icon} STEP 3: 背景動画取得")
+            s3_col1, s3_col2 = st.columns([3, 1])
+            with s3_col2:
+                s3_label = "🔄 再生成" if step_status["bg_video"] else "▶️ 生成開始"
+                if st.button(s3_label, key="step_bg_video_btn", use_container_width=True):
+                    run_step_bg_video(script, prompts, step_output_dir, step_history)
+                    st.rerun()
+
+            # STEP 4: 画像
+            s4_icon = "✅" if step_status["images"] else "⬜"
+            img_count = 0
+            img_dir = step_output_dir / "images"
+            if img_dir.exists():
+                img_count = len(list(img_dir.glob("*.png"))) + len(list(img_dir.glob("*.jpg")))
+            st.markdown(f"### {s4_icon} STEP 4: 画像生成 ({img_count}枚)")
+            s4_col1, s4_col2 = st.columns([3, 1])
+            with s4_col2:
+                s4_label = "🔄 再生成" if step_status["images"] else "▶️ 生成開始"
+                if st.button(s4_label, key="step_images_btn", use_container_width=True):
+                    run_step_images(script, prompts, step_output_dir, step_history)
+                    st.rerun()
+
+            # STEP 5: タイムライン/動画合成
+            s5_icon = "✅" if step_status["timeline"] else "⬜"
+            st.markdown(f"### {s5_icon} STEP 5: タイムライン/動画合成")
+            s5_col1, s5_col2 = st.columns([3, 1])
+            with s5_col2:
+                s5_label = "🔄 再生成" if step_status["timeline"] else "▶️ 生成開始"
+                if st.button(s5_label, key="step_timeline_btn", use_container_width=True):
+                    # ディスクから素材を読み込み
+                    materials = load_existing_materials(str(step_output_dir))
+                    st.session_state.audio_files = materials["audio_files"]
+                    gen_images = materials["images"]
+                    bg_videos = materials["videos"]
+                    bgm = Path(materials["bgm"]) if materials["bgm"] else None
+
+                    run_step_timeline(
+                        script, prompts, mode, output_formats, step_output_dir,
+                        gen_images, bg_videos, bgm, step_history,
+                    )
+                    st.session_state.generation_complete = True
+                    st.rerun()
+
+            st.info(f"📂 出力先: `{step_output_dir}`")
+
+        else:
+            # 一括モード（従来方式）
+            st.subheader("🎯 生成する素材を選択")
+            col_audio, col_image, col_bgm, col_bg_video = st.columns(4)
+            with col_audio:
+                generate_audio = st.checkbox("🎤 音声", value=True, key="generate_audio_checkbox")
+            with col_image:
+                generate_images = st.checkbox("🖼️ 画像", value=True, key="generate_images_checkbox")
+            with col_bgm:
+                generate_bgm = st.checkbox("🎵 BGM", value=True, key="generate_bgm_checkbox")
+            with col_bg_video:
+                generate_bg_video = st.checkbox("🎬 背景動画", value=True, key="generate_bg_video_checkbox")
+
             if not generate_audio and not generate_images and not generate_bgm and not generate_bg_video:
-                st.error("❌ 少なくとも1つの素材を選択してください")
-            elif not all(api_status.values()):
-                st.warning("⚠️ 一部のAPIキーが未設定です。設定ページで設定してください。")
-            elif mode == "自動モード（完成動画出力）" and not output_formats:
-                st.error("❌ 出力形式を1つ以上選択してください")
-            else:
-                run_generation(script, prompts, mode, output_formats, generate_audio, generate_images, generate_bgm, generate_bg_video)
+                st.warning("⚠️ 少なくとも1つの素材を選択してください")
+
+            st.divider()
+
+            if st.button("🚀 生成を開始", type="primary", use_container_width=True):
+                if not generate_audio and not generate_images and not generate_bgm and not generate_bg_video:
+                    st.error("❌ 少なくとも1つの素材を選択してください")
+                elif not all(api_status.values()):
+                    st.warning("⚠️ 一部のAPIキーが未設定です。設定ページで設定してください。")
+                elif mode == "自動モード（完成動画出力）" and not output_formats:
+                    st.error("❌ 出力形式を1つ以上選択してください")
+                else:
+                    run_generation(script, prompts, mode, output_formats, generate_audio, generate_images, generate_bgm, generate_bg_video)
 
     # STEP 5: 結果ダウンロード
     st.header("STEP 5: 結果ダウンロード")
@@ -1700,8 +1871,714 @@ def main_page() -> None:
         st.info("📥 生成が完了すると、ここにダウンロードリンクが表示されます。")
 
 
+def detect_step_status(output_dir: Path) -> dict[str, bool]:
+    """出力ディレクトリをスキャンして各ステップの完了状態を判定"""
+    status = {
+        "audio": False,
+        "bgm": False,
+        "bg_video": False,
+        "images": False,
+        "timeline": False,
+    }
+    if not output_dir or not output_dir.exists():
+        return status
+
+    audio_dir = output_dir / "audio"
+    if audio_dir.exists() and list(audio_dir.glob("*.wav")):
+        status["audio"] = True
+
+    bgm_dir = output_dir / "bgm"
+    if bgm_dir.exists() and (list(bgm_dir.glob("*.mp3")) or list(bgm_dir.glob("*.wav"))):
+        status["bgm"] = True
+
+    video_bg_dir = output_dir / "videos" / "backgrounds"
+    if video_bg_dir.exists() and list(video_bg_dir.glob("*.mp4")):
+        status["bg_video"] = True
+
+    image_dir = output_dir / "images"
+    if image_dir.exists() and (list(image_dir.glob("*.png")) or list(image_dir.glob("*.jpg"))):
+        status["images"] = True
+
+    if (output_dir / "timeline.csv").exists():
+        status["timeline"] = True
+    video_dir = output_dir / "videos"
+    if video_dir.exists() and list(video_dir.glob("*.mp4")):
+        status["timeline"] = True
+
+    return status
+
+
+def _get_or_create_history_entry(output_dir: Path) -> dict:
+    """履歴エントリを取得または作成する"""
+    if st.session_state.resume_mode["enabled"] and st.session_state.resume_mode["entry"]:
+        entry = st.session_state.resume_mode["entry"]
+        entry["status"] = "in_progress"
+    else:
+        entry = create_history_entry(str(output_dir))
+
+    st.session_state.current_history_id = entry["id"]
+    add_history_entry(entry)
+    return entry
+
+
+def run_step_audio(script, output_dir: Path, history_entry: dict | None = None) -> dict:
+    """ステップ1: 音声生成"""
+    import gc
+
+    audio_mode = st.session_state.get("audio_mode", "batch")
+    audio_dir = output_dir / "audio"
+    audio_dir.mkdir(exist_ok=True)
+
+    if not st.session_state.reuse_mode["enabled"]:
+        st.session_state.audio_files = {}
+
+    # 再利用モード
+    if st.session_state.reuse_mode["enabled"] and st.session_state.reuse_mode["audio_files"]:
+        reused_audio = st.session_state.reuse_mode["audio_files"]
+        copied_audio = {}
+        for key, src_path in reused_audio.items():
+            src_file = Path(src_path)
+            if src_file.exists():
+                dst_file = audio_dir / src_file.name
+                if src_file.resolve() != dst_file.resolve():
+                    shutil.copy2(src_file, dst_file)
+                copied_audio[key] = str(dst_file)
+        st.session_state.audio_files = copied_audio
+        st.success(f"♻️ 既存の音声ファイルをコピー: {len(copied_audio)}件")
+
+        # 一括モードの場合は再利用ファイルを結合
+        import wave
+        if audio_mode == "batch" and "full" not in copied_audio:
+            sorted_files = []
+            for key, path in copied_audio.items():
+                if key != "full" and Path(path).exists():
+                    try:
+                        num = int(key) if isinstance(key, str) else key
+                        sorted_files.append((num, path))
+                    except (ValueError, TypeError):
+                        pass
+            sorted_files.sort(key=lambda x: x[0])
+            if sorted_files:
+                audio_segments = []
+                for _num, wav_path in sorted_files:
+                    with wave.open(wav_path, "rb") as wf:
+                        audio_segments.append(wf.readframes(wf.getnframes()))
+                full_audio_path = audio_dir / "full_audio.wav"
+                with wave.open(str(full_audio_path), "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(24000)
+                    for segment in audio_segments:
+                        wf.writeframes(segment)
+                st.session_state.audio_files["full"] = str(full_audio_path)
+                st.success(f"✅ 音声ファイルを1本に結合: {full_audio_path.name}")
+
+        if history_entry:
+            history_entry["progress"]["audio_generated"] = True
+            history_entry["files"]["audio_files"] = dict(st.session_state.audio_files)
+            add_history_entry(history_entry)
+        gc.collect()
+        return {"success": True, "files": dict(st.session_state.audio_files), "error": None}
+
+    # 新規生成
+    total_lines = len(script.lines) if script.lines else 0
+    wait_seconds = 12
+    estimated_time = total_lines * (wait_seconds + 2)
+    estimated_minutes = estimated_time // 60
+
+    if total_lines > 30:
+        st.warning(f"⚠️ セリフ数: {total_lines}行 - 時間がかかります")
+    st.info(f"💡 予想所要時間: 約{estimated_minutes}分（各セリフ間に{wait_seconds}秒待機）")
+
+    progress = st.progress(0)
+    status = st.empty()
+    status.text("🎤 音声を生成中...")
+
+    try:
+        tts = TTSClient()
+
+        # 既存ファイルチェック（途中再開）
+        existing_audio = {}
+        for wav_file in sorted(audio_dir.glob("*.wav")):
+            if wav_file.name != "full_audio.wav":
+                try:
+                    num = int(wav_file.stem.split("_")[0])
+                    existing_audio[num] = str(wav_file)
+                except (ValueError, IndexError):
+                    pass
+        if existing_audio:
+            st.info(f"♻️ 既存の音声ファイル {len(existing_audio)}件を検出（途中再開）")
+            st.session_state.audio_files.update(existing_audio)
+
+        if audio_mode == "batch":
+            def update_progress(current, total, message):
+                progress.progress((current + 1) / total)
+                status.text(f"🎤 生成中: {current + 1}/{total} - {message}")
+                if history_entry and (current + 1) % 5 == 0:
+                    for wav_file in sorted(audio_dir.glob("*.wav")):
+                        if wav_file.name != "full_audio.wav":
+                            try:
+                                num = int(wav_file.stem.split("_")[0])
+                                st.session_state.audio_files[num] = str(wav_file)
+                            except (ValueError, IndexError):
+                                pass
+                    if st.session_state.audio_files:
+                        history_entry["files"]["audio_files"] = dict(st.session_state.audio_files)
+                        add_history_entry(history_entry)
+
+            output_path = audio_dir / "full_audio.wav"
+            wav_path = tts.synthesize_script(
+                script, output_path,
+                progress_callback=update_progress,
+                allow_fallback=False,
+            )
+            st.session_state.audio_files["full"] = str(wav_path)
+        else:
+            for i, line in enumerate(script.lines):
+                output_path = audio_dir / f"{line.number:03d}_{line.speaker}.wav"
+                wav_path = tts.synthesize(line.text, line.speaker, output_path)
+                st.session_state.audio_files[line.number] = str(wav_path)
+                progress.progress((i + 1) / script.total_lines)
+
+        progress.progress(1.0)
+        status.text("✅ 音声生成完了")
+
+        if history_entry:
+            history_entry["progress"]["audio_generated"] = True
+            history_entry["files"]["audio_files"] = dict(st.session_state.audio_files)
+            add_history_entry(history_entry)
+
+        gc.collect()
+        return {"success": True, "files": dict(st.session_state.audio_files), "error": None}
+
+    except Exception as audio_err:
+        error_str = str(audio_err)
+        log_error_to_file(output_dir, "音声生成エラー", error_str, traceback.format_exc())
+
+        error_lower = error_str.lower()
+        is_rate_limit = any(x in error_lower for x in ["クォータ", "quota", "429", "rate", "limit"]) or "レート制限" in error_str
+        if is_rate_limit:
+            st.error("❌ 音声生成がレート制限に達しました")
+        else:
+            st.error(f"❌ 音声生成エラー: {audio_err}")
+
+        # 生成済みファイルを検出して保存
+        if audio_dir.exists():
+            for wav_file in sorted(audio_dir.glob("*.wav")):
+                if wav_file.name == "full_audio.wav":
+                    st.session_state.audio_files["full"] = str(wav_file)
+                else:
+                    try:
+                        num = int(wav_file.stem.split("_")[0])
+                        st.session_state.audio_files[num] = str(wav_file)
+                    except (ValueError, IndexError):
+                        pass
+
+        generated_count = len(st.session_state.audio_files)
+        if generated_count > 0:
+            st.info(f"💾 生成済み音声: {generated_count}件を保存しました。")
+            if history_entry:
+                history_entry["progress"]["audio_generated"] = True
+                history_entry["files"]["audio_files"] = dict(st.session_state.audio_files)
+                history_entry["error"] = history_entry.get("error", "") + f"音声生成エラー({generated_count}件生成済み); "
+                add_history_entry(history_entry)
+
+        gc.collect()
+        return {"success": False, "files": dict(st.session_state.audio_files), "error": error_str}
+
+
+def run_step_bgm(script, prompts, output_dir: Path, history_entry: dict | None = None) -> dict:
+    """ステップ2: BGM生成"""
+    import gc
+
+    bgm_dir = output_dir / "bgm"
+    bgm_dir.mkdir(exist_ok=True)
+    bgm_path = None
+
+    try:
+        # 再利用モード
+        if st.session_state.reuse_mode["enabled"] and st.session_state.reuse_mode["bgm"]:
+            src_bgm = Path(st.session_state.reuse_mode["bgm"])
+            if src_bgm.exists():
+                dst_bgm = bgm_dir / src_bgm.name
+                if src_bgm.resolve() != dst_bgm.resolve():
+                    shutil.copy2(src_bgm, dst_bgm)
+                bgm_path = dst_bgm
+                st.success(f"♻️ 既存のBGMファイルをコピー: {bgm_path.name}")
+
+        if bgm_path is None:
+            status = st.empty()
+            status.text("🎵 BGMを生成中...")
+
+            total_duration = 60
+            if st.session_state.audio_files:
+                try:
+                    if "full" in st.session_state.audio_files:
+                        audio_path = st.session_state.audio_files["full"]
+                    else:
+                        audio_path = list(st.session_state.audio_files.values())[0]
+                    from moviepy import AudioFileClip
+                    clip = AudioFileClip(audio_path)
+                    if "full" in st.session_state.audio_files:
+                        total_duration = clip.duration
+                    else:
+                        total_duration = clip.duration * len(st.session_state.audio_files)
+                    clip.close()
+                    st.info(f"🎵 音声から長さを検出: {total_duration:.1f}秒")
+                except Exception:
+                    pass
+
+            if total_duration == 60 and prompts and prompts.prompts:
+                last_prompt = prompts.prompts[-1]
+                total_duration = time_to_seconds(last_prompt.end_time)
+
+            bgm_path = bgm_dir / "background_music.mp3"
+            bgm_client = BeatovenClient()
+            bgm_client.generate(int(total_duration), bgm_path)
+            if not bgm_path.exists():
+                st.warning("⚠️ BGMファイルが作成されませんでした（スキップ）")
+                bgm_path = None
+            else:
+                st.success(f"✅ BGM生成完了: {bgm_path.name}")
+
+    except Exception as bgm_err:
+        log_error_to_file(output_dir, "BGM生成エラー", str(bgm_err), traceback.format_exc())
+        st.warning(f"⚠️ BGM生成に失敗（スキップ）: {bgm_err}")
+        bgm_path = None
+
+    if history_entry:
+        history_entry["progress"]["bgm_generated"] = True
+        history_entry["files"]["bgm"] = str(bgm_path) if bgm_path else None
+        add_history_entry(history_entry)
+
+    gc.collect()
+    return {"success": bgm_path is not None, "files": {"bgm": str(bgm_path) if bgm_path else None}, "error": None}
+
+
+def run_step_bg_video(script, prompts, output_dir: Path, history_entry: dict | None = None) -> dict:
+    """ステップ3: 背景動画ダウンロード"""
+    import gc
+    import re as _re
+
+    video_dir = output_dir / "videos" / "backgrounds"
+    video_dir.mkdir(parents=True, exist_ok=True)
+    background_videos = {}
+
+    progress = st.progress(0)
+    status = st.empty()
+
+    try:
+        # 再利用モード
+        if st.session_state.reuse_mode["enabled"] and st.session_state.reuse_mode.get("videos"):
+            status.text("♻️ 既存の動画をコピー中...")
+            for num, src_path in st.session_state.reuse_mode["videos"].items():
+                src_file = Path(src_path)
+                if src_file.exists():
+                    dst_file = video_dir / src_file.name
+                    if src_file.resolve() != dst_file.resolve():
+                        shutil.copy2(src_file, dst_file)
+                    background_videos[num] = str(dst_file)
+            if background_videos:
+                st.success(f"♻️ 既存の動画: {len(background_videos)}本をコピーしました")
+
+        if not background_videos:
+            status.text("🎥 背景動画を検索中...")
+            stock_client = StockVideoClient()
+
+            _jp_to_en = {
+                "不動産": "real estate", "投資": "investment", "マンション": "apartment building",
+                "金利": "interest rate", "経済": "economy", "お金": "money finance",
+                "株": "stock market", "ビジネス": "business office", "会議": "meeting",
+                "グラフ": "chart graph", "上昇": "growth arrow", "下降": "decline",
+                "都市": "city skyline", "建物": "building architecture", "家": "house home",
+                "人": "people", "女性": "woman", "男性": "man", "笑顔": "smile happy",
+                "驚": "surprised", "怒": "angry", "悲": "sad", "喜": "happy celebration",
+                "炎": "fire flame", "水": "water ocean", "空": "sky clouds",
+                "夜": "night city", "朝": "morning sunrise", "自然": "nature landscape",
+                "テクノロジー": "technology", "コンピュータ": "computer", "データ": "data digital",
+                "選挙": "election voting", "政治": "politics government", "ニュース": "news broadcast",
+                "食事": "food dining", "料理": "cooking kitchen", "スーパー": "supermarket shopping",
+                "工場": "factory industrial", "半導体": "semiconductor technology",
+                "インフレ": "inflation economy", "価格": "price tag", "給料": "salary paycheck",
+            }
+
+            def _to_english_query(text: str) -> str:
+                matches = []
+                for jp, en in _jp_to_en.items():
+                    if jp in text:
+                        matches.append(en)
+                if matches:
+                    return " ".join(matches[:3])
+                return "abstract background motion"
+
+            chapter_pattern = _re.compile(r'【[\d:]+〜\s*(.+?)】')
+            raw_content = st.session_state.get("prompt_raw_content", "") or st.session_state.get("script_raw_content", "")
+            chapters = chapter_pattern.findall(raw_content)
+
+            # 背景動画数: 画像枚数の約半分（最大20本）
+            max_bg_videos = 20
+            if prompts and prompts.prompts:
+                target_count = min(max_bg_videos, max(1, len(prompts.prompts) // 2))
+            else:
+                target_count = max_bg_videos
+
+            if chapters:
+                # チャプター数がtarget_countより少なければ全部、多ければ間引き
+                if len(chapters) <= target_count:
+                    search_items = [(i + 1, _to_english_query(ch)) for i, ch in enumerate(chapters)]
+                else:
+                    ch_step = max(1, len(chapters) // target_count)
+                    search_items = [(i + 1, _to_english_query(chapters[i])) for i in range(0, len(chapters), ch_step)][:target_count]
+                st.info(f"📑 {len(chapters)}個のチャプターを検出 → {len(search_items)}本の背景動画を取得")
+            elif prompts and prompts.prompts:
+                step = max(1, len(prompts.prompts) // target_count)
+                selected = prompts.prompts[::step][:target_count]
+                search_items = [(p.number, _to_english_query(p.prompt)) for p in selected]
+            elif script and script.lines:
+                step = max(1, len(script.lines) // target_count)
+                selected = script.lines[::step][:target_count]
+                search_items = [(i + 1, _to_english_query(line.text)) for i, line in enumerate(selected)]
+            else:
+                search_items = [(1, "abstract background")]
+
+            for i, (number, search_query) in enumerate(search_items):
+                try:
+                    status.text(f"🎥 背景動画検索中: {i + 1}/{len(search_items)}")
+                    videos = stock_client.search_pexels(search_query, per_page=1)
+                    if videos:
+                        video_path = video_dir / f"{number:03d}_bg.mp4"
+                        stock_client.download(videos[0], video_path)
+                        background_videos[number] = str(video_path)
+                        st.success(f"✅ 背景動画 {number} ダウンロード完了")
+                    else:
+                        videos = stock_client.search_pixabay(search_query, per_page=1)
+                        if videos:
+                            video_path = video_dir / f"{number:03d}_bg.mp4"
+                            stock_client.download(videos[0], video_path)
+                            background_videos[number] = str(video_path)
+                            st.success(f"✅ 背景動画 {number} ダウンロード完了 (Pixabay)")
+                except Exception as vid_err:
+                    log_error_to_file(output_dir, f"背景動画取得エラー（{number}）", str(vid_err), traceback.format_exc())
+                    st.warning(f"⚠️ 背景動画取得エラー（{number}）: {vid_err}")
+
+                progress.progress((i + 1) / len(search_items))
+
+            if background_videos:
+                st.success(f"✅ 背景動画: {len(background_videos)}件準備完了")
+            else:
+                st.info("ℹ️ 背景動画なしで続行します")
+
+    except Exception as bg_err:
+        log_error_to_file(output_dir, "背景動画取得エラー", str(bg_err), traceback.format_exc())
+        st.warning(f"⚠️ 背景動画の取得中にエラー: {bg_err}")
+
+    if history_entry:
+        history_entry["files"]["videos"] = {str(k): v for k, v in background_videos.items()}
+        add_history_entry(history_entry)
+
+    gc.collect()
+    return {"success": bool(background_videos), "files": {"videos": background_videos}, "error": None}
+
+
+def run_step_images(script, prompts, output_dir: Path, history_entry: dict | None = None) -> dict:
+    """ステップ4: 画像生成（3枚毎にチェックポイント+gc.collect）"""
+    import gc
+
+    generated_images = {}
+    reused_count = 0
+    generated_count = 0
+
+    progress = st.progress(0)
+    status = st.empty()
+
+    try:
+        # 再利用モード
+        if st.session_state.reuse_mode["enabled"] and st.session_state.reuse_mode["images"]:
+            status.text("♻️ 既存の画像をコピー中...")
+            image_dir = output_dir / "images"
+            image_dir.mkdir(exist_ok=True)
+            for num, src_path in st.session_state.reuse_mode["images"].items():
+                src_file = Path(src_path)
+                if src_file.exists():
+                    dst_file = image_dir / src_file.name
+                    if src_file.resolve() != dst_file.resolve():
+                        shutil.copy2(src_file, dst_file)
+                    generated_images[num] = str(dst_file)
+                else:
+                    generated_images[num] = src_path
+            reused_count = len(generated_images)
+            st.success(f"♻️ 既存の画像: {reused_count}枚をコピーしました")
+
+        # 画像プロンプト自動生成
+        user_specified = st.session_state.get("user_specified_num_images", 0)
+        should_regenerate = prompts.total_images == 0
+
+        if should_regenerate:
+            if user_specified > 0:
+                calculated_images = user_specified
+            else:
+                raw_content = st.session_state.get("script_raw_content", "")
+                if raw_content:
+                    detected_items = count_script_items_from_content(raw_content)
+                else:
+                    detected_items = count_script_items(script)
+                if detected_items == 0:
+                    detected_items = script.total_lines
+                if detected_items <= 0:
+                    detected_items = max(1, len(script.lines) if script.lines else 1)
+                calculated_images = max(1, min(detected_items, 100))
+            st.info(f"🎨 {calculated_images}件の画像プロンプトを自動生成中...")
+            try:
+                auto_prompts = generate_image_prompts_from_script(script, calculated_images)
+                prompts = auto_prompts
+                st.session_state.prompts = auto_prompts
+                st.success(f"✅ {prompts.total_images}件の画像プロンプトを自動生成しました")
+            except Exception as auto_err:
+                st.warning(f"⚠️ 画像プロンプト自動生成エラー: {auto_err}")
+
+        # 画像生成
+        if prompts.total_images > 0:
+            missing_prompts = [p for p in prompts.prompts if p.number not in generated_images]
+
+            if missing_prompts:
+                st.info(f"🖼️ 不足している画像: {len(missing_prompts)}枚を新規生成します...")
+                image_gen = ImageGenerator()
+                image_dir = output_dir / "images"
+                image_dir.mkdir(exist_ok=True)
+                stock_client = StockVideoClient()
+
+                image_errors = []
+                for i, p in enumerate(missing_prompts):
+                    try:
+                        status.text(f"🖼️ 画像生成中: {i + 1}/{len(missing_prompts)} - {p.prompt[:30]}...")
+                        output_path = image_dir / f"{p.number:03d}_scene.png"
+                        image_gen.generate(p.prompt, output_path)
+                        generated_images[p.number] = str(output_path)
+                        generated_count += 1
+                    except Exception as img_err:
+                        log_error_to_file(output_dir, f"画像生成エラー（画像 {p.number}）", str(img_err), traceback.format_exc())
+                        image_errors.append(p.number)
+                        try:
+                            stock_path = image_dir / f"{p.number:03d}_stock.jpg"
+                            keywords = p.prompt.split()[:3]
+                            search_query = " ".join(keywords) if keywords else "background"
+                            stock_client.download_image(search_query, stock_path)
+                            generated_images[p.number] = str(stock_path)
+                            generated_count += 1
+                        except Exception as stock_err:
+                            log_error_to_file(output_dir, f"ストック画像取得エラー（画像 {p.number}）", str(stock_err), traceback.format_exc())
+
+                    progress.progress((i + 1) / len(missing_prompts))
+
+                    # 3枚毎にチェックポイント + gc.collect
+                    if (i + 1) % 3 == 0:
+                        if history_entry:
+                            history_entry["files"]["images"] = {str(k): v for k, v in generated_images.items()}
+                            add_history_entry(history_entry)
+                        gc.collect()
+
+                if image_errors:
+                    st.warning(f"⚠️ {len(image_errors)}枚の画像でAI生成エラー（ストック代替済み）: {image_errors}")
+            else:
+                st.success(f"♻️ 全ての画像が既存のものを再利用（{reused_count}枚）")
+
+            if generated_images:
+                st.success(f"✅ 画像準備完了: 再利用 {reused_count}枚 + 新規 {generated_count}枚 = 合計 {len(generated_images)}枚")
+            else:
+                st.error("❌ 画像を生成できませんでした")
+        else:
+            st.error("❌ 画像プロンプトがないため、画像生成をスキップしました")
+
+    except Exception as img_err:
+        log_error_to_file(output_dir, "画像生成エラー", str(img_err), traceback.format_exc())
+        st.error(f"❌ 画像生成エラー: {img_err}")
+
+    if history_entry:
+        history_entry["progress"]["images_generated"] = True
+        history_entry["files"]["images"] = {str(k): v for k, v in generated_images.items()}
+        add_history_entry(history_entry)
+
+    gc.collect()
+    return {"success": bool(generated_images), "files": {"images": generated_images}, "error": None}
+
+
+def run_step_timeline(script, prompts, mode: str, output_formats: list, output_dir: Path, generated_images: dict, background_videos: dict, bgm_path, history_entry: dict | None = None) -> dict:
+    """ステップ5: タイムライン生成/動画合成"""
+    import gc
+
+    status = st.empty()
+
+    def get_audio_duration_safe(audio_path: str) -> float:
+        try:
+            from moviepy import AudioFileClip
+            clip = AudioFileClip(audio_path)
+            duration = clip.duration
+            clip.close()
+            return duration if duration else 5.0
+        except Exception:
+            try:
+                file_size = os.path.getsize(audio_path)
+                return max(1.0, file_size / 48000)
+            except Exception:
+                return 5.0
+
+    if "Filmora" in mode:
+        status.text("📋 タイムラインを生成中...")
+        timeline = Timeline()
+
+        audio_total_duration = 0.0
+        if st.session_state.audio_files:
+            if "full" in st.session_state.audio_files:
+                audio_path = st.session_state.audio_files["full"]
+                duration = get_audio_duration_safe(audio_path)
+                timeline.add_entry(TimelineEntry(
+                    start_time=0.0, end_time=duration,
+                    media_type="audio", file_path=audio_path, speaker="all",
+                ))
+                audio_total_duration = duration
+            else:
+                current_time = 0.0
+                for line in script.lines:
+                    if line.number in st.session_state.audio_files:
+                        audio_path = st.session_state.audio_files[line.number]
+                        duration = get_audio_duration_safe(audio_path)
+                        timeline.add_entry(TimelineEntry(
+                            start_time=current_time, end_time=current_time + duration,
+                            media_type="audio", file_path=audio_path, speaker=line.speaker,
+                        ))
+                        current_time += duration
+                audio_total_duration = current_time
+
+        if prompts and prompts.prompts:
+            last_prompt = prompts.prompts[-1]
+            prompt_total_duration = time_to_seconds(last_prompt.end_time)
+        else:
+            prompt_total_duration = len(generated_images) * 5.0 if generated_images else 10.0
+
+        if audio_total_duration > 0 and prompt_total_duration > 0:
+            time_scale = audio_total_duration / prompt_total_duration
+        else:
+            time_scale = 1.0
+
+        if prompts:
+            for p in prompts.prompts:
+                if p.number in generated_images:
+                    scaled_start = time_to_seconds(p.start_time) * time_scale
+                    scaled_end = time_to_seconds(p.end_time) * time_scale
+                    timeline.add_entry(TimelineEntry(
+                        start_time=scaled_start, end_time=scaled_end,
+                        media_type="image", file_path=generated_images[p.number],
+                    ))
+
+        if bgm_path and Path(bgm_path).exists():
+            timeline.add_entry(TimelineEntry(
+                start_time=0, end_time=timeline.total_duration,
+                media_type="bgm", file_path=str(bgm_path),
+            ))
+
+        timeline.to_csv(output_dir / "timeline.csv")
+        status.text("✅ タイムライン生成完了")
+
+    else:
+        # 自動モード: 動画合成
+        status.text("🎬 動画を合成中...")
+        editor = VideoEditor()
+        timeline = Timeline()
+
+        if not st.session_state.audio_files:
+            st.warning("⚠️ 音声がないため、動画合成をスキップします。")
+            if history_entry:
+                history_entry["status"] = "completed"
+                history_entry["error"] = history_entry.get("error", "") + "音声なしのため動画合成スキップ"
+                add_history_entry(history_entry)
+            gc.collect()
+            return {"success": True, "files": {}, "error": "音声なしのため動画合成スキップ"}
+
+        if "full" in st.session_state.audio_files:
+            audio_path = st.session_state.audio_files["full"]
+            duration = get_audio_duration_safe(audio_path)
+            timeline.add_entry(TimelineEntry(
+                start_time=0.0, end_time=duration,
+                media_type="audio", file_path=audio_path, speaker="all",
+            ))
+        else:
+            current_time = 0.0
+            for line in script.lines:
+                if line.number in st.session_state.audio_files:
+                    audio_path = st.session_state.audio_files[line.number]
+                    duration = get_audio_duration_safe(audio_path)
+                    timeline.add_entry(TimelineEntry(
+                        start_time=current_time, end_time=current_time + duration,
+                        media_type="audio", file_path=audio_path, speaker=line.speaker,
+                    ))
+                    current_time += duration
+
+        audio_total_duration = timeline.total_duration
+        if prompts and prompts.prompts:
+            last_prompt = prompts.prompts[-1]
+            prompt_total_duration = time_to_seconds(last_prompt.end_time)
+        else:
+            prompt_total_duration = audio_total_duration
+
+        if prompt_total_duration > 0:
+            time_scale = audio_total_duration / prompt_total_duration
+        else:
+            time_scale = 1.0
+
+        st.info(f"📊 タイミング調整: 音声 {audio_total_duration:.1f}秒 / プロンプト {prompt_total_duration:.1f}秒 = スケール {time_scale:.2f}x")
+
+        if prompts:
+            for p in prompts.prompts:
+                if p.number in generated_images:
+                    scaled_start = time_to_seconds(p.start_time) * time_scale
+                    scaled_end = time_to_seconds(p.end_time) * time_scale
+                    if p.number in background_videos:
+                        timeline.add_entry(TimelineEntry(
+                            start_time=scaled_start, end_time=scaled_end,
+                            media_type="video", file_path=background_videos[p.number],
+                        ))
+                    timeline.add_entry(TimelineEntry(
+                        start_time=scaled_start, end_time=scaled_end,
+                        media_type="image", file_path=generated_images[p.number],
+                    ))
+
+        if not generated_images:
+            st.error("❌ 画像が生成されていないため、動画を作成できません。")
+            gc.collect()
+            return {"success": False, "files": {}, "error": "画像なし"}
+
+        if not output_formats:
+            st.error("❌ 出力形式が選択されていません。")
+            gc.collect()
+            return {"success": False, "files": {}, "error": "出力形式未選択"}
+
+        video_dir = output_dir / "videos"
+        video_dir.mkdir(exist_ok=True)
+
+        for i, fmt in enumerate(output_formats):
+            status.text(f"🎬 動画を合成中... ({i+1}/{len(output_formats)}: {fmt})")
+            output_path = video_dir / f"{fmt}.mp4"
+            try:
+                editor.create_video(
+                    timeline=timeline, output_path=output_path,
+                    format_name=fmt, bgm_path=bgm_path,
+                )
+                st.success(f"✅ {fmt}.mp4 を生成しました")
+            except Exception as video_err:
+                log_error_to_file(output_dir, f"動画生成エラー（{fmt}）", str(video_err), traceback.format_exc())
+                st.error(f"❌ {fmt} 動画生成エラー: {video_err}")
+
+    if history_entry:
+        history_entry["progress"]["video_generated"] = True
+        history_entry["status"] = "completed"
+        add_history_entry(history_entry)
+
+    gc.collect()
+    return {"success": True, "files": {}, "error": None}
+
+
 def run_generation(script, prompts, mode: str, output_formats: list, generate_audio: bool = True, generate_images: bool = True, generate_bgm: bool = False, generate_bg_video: bool = False) -> None:
-    """生成処理を実行
+    """生成処理を実行（全ステップを順番に実行するラッパー）
 
     Args:
         generate_audio: 音声を生成するかどうか
@@ -1709,9 +2586,6 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
         generate_bgm: BGMを生成するかどうか
         generate_bg_video: 背景動画を取得するかどうか
     """
-    progress = st.progress(0)
-    status = st.empty()
-
     # デバッグ: 選択されたモードを表示
     materials_info = []
     if generate_audio:
@@ -1732,869 +2606,97 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
     output_dir = st.session_state.output_dir or get_output_dir()
     st.session_state.output_dir = output_dir
 
-    # 履歴エントリを最初に作成して保存
+    # 履歴エントリを作成
     history_entry = None
     try:
-        if st.session_state.resume_mode["enabled"] and st.session_state.resume_mode["entry"]:
-            history_entry = st.session_state.resume_mode["entry"]
-            history_entry["status"] = "in_progress"
-        else:
-            history_entry = create_history_entry(str(output_dir))
-            history_entry["settings"]["output_mode"] = mode
-            history_entry["settings"]["output_formats"] = output_formats
-
-        st.session_state.current_history_id = history_entry["id"]
-        add_history_entry(history_entry)  # 即座に保存
+        history_entry = _get_or_create_history_entry(output_dir)
+        history_entry["settings"]["output_mode"] = mode
+        history_entry["settings"]["output_formats"] = output_formats
+        add_history_entry(history_entry)
     except Exception as init_err:
         st.warning(f"⚠️ 履歴初期化エラー: {init_err}")
 
     try:
-        # 早期バリデーション: 台本の確認
+        # 早期バリデーション
         if not script or not script.lines or len(script.lines) == 0:
             st.error("❌ 台本が空です。セリフが含まれるファイルをアップロードしてください。")
-            st.info("""
-            💡 **対応フォーマット:**
-            - `Speaker 1: セリフ` 形式
-            - `1. セリフ` 形式（番号付き）
-            - 通常のテキスト行（5文字以上）
-
-            ファイルを確認して、セリフが含まれていることを確認してください。
-            """)
             if history_entry:
                 history_entry["status"] = "interrupted"
                 history_entry["error"] = "台本が空"
                 add_history_entry(history_entry)
             return
 
-        # 台本パース完了 - 台本とプロンプトを保存
+        # 台本とプロンプトを保存
         if history_entry:
             history_entry["progress"]["script_parsed"] = True
-
-            # 台本を保存（再開時に復元できるように）
             script_file = save_script_to_output(script, output_dir)
             if script_file:
                 history_entry["files"]["script_file"] = str(script_file)
-
-            # プロンプトも保存
             if prompts:
                 prompts_file = save_prompts_to_output(prompts, output_dir)
                 if prompts_file:
                     history_entry["files"]["prompts_file"] = str(prompts_file)
-
             add_history_entry(history_entry)
 
-        # 中断耐性: Streamlit例外が発生しても残りのステップを続行する
-        _pending_streamlit_exception = None
+        overall_progress = st.progress(0)
 
-        def _is_streamlit_exception(exc: BaseException) -> bool:
-            """Streamlitの内部例外かどうかを判定"""
-            exc_name = type(exc).__name__
-            return "Rerun" in exc_name or "StopException" in exc_name or "Stop" == exc_name
-
-        # ステップ1: 音声生成
-        audio_mode = st.session_state.get("audio_mode", "batch")
-        audio_error_occurred = False
-        audio_dir = output_dir / "audio"
-        audio_dir.mkdir(exist_ok=True)
-
-        # 再利用モードでない場合、前回のセッション状態をクリア
-        if not st.session_state.reuse_mode["enabled"]:
-            st.session_state.audio_files = {}
-
-        if not generate_audio:
+        # STEP 1: 音声生成
+        if generate_audio:
+            run_step_audio(script, output_dir, history_entry)
+        else:
             st.info("⏭️ 音声生成をスキップしました")
-            progress.progress(0.25)
-        elif st.session_state.reuse_mode["enabled"] and st.session_state.reuse_mode["audio_files"]:
-            # 再利用モード：既存の音声をコピーして使用
-            status.text("♻️ 既存の音声をコピー中...")
-            reused_audio = st.session_state.reuse_mode["audio_files"]
-            copied_audio = {}
+        overall_progress.progress(0.25)
 
-            # 音声ファイルを新しいフォルダにコピー
-            for key, src_path in reused_audio.items():
-                src_file = Path(src_path)
-                if src_file.exists():
-                    dst_file = audio_dir / src_file.name
-                    if src_file.resolve() != dst_file.resolve():
-                        shutil.copy2(src_file, dst_file)
-                    copied_audio[key] = str(dst_file)
-
-            st.session_state.audio_files = copied_audio
-            reused_count = len(copied_audio)
-            st.success(f"♻️ 既存の音声ファイルをコピー: {reused_count}件")
-
-            # 一括モードの場合は再利用ファイルを結合（fullがない場合）
-            audio_mode = st.session_state.get("audio_mode", "batch")
-            if audio_mode == "batch" and "full" not in copied_audio:
-                status.text("🔗 音声ファイルを結合中...")
-                try:
-                    import wave
-
-                    # ファイル番号順にソート
-                    sorted_files = []
-                    for key, path in copied_audio.items():
-                        if key != "full" and Path(path).exists():
-                            try:
-                                num = int(key) if isinstance(key, str) else key
-                                sorted_files.append((num, path))
-                            except (ValueError, TypeError):
-                                pass
-                    sorted_files.sort(key=lambda x: x[0])
-
-                    if sorted_files:
-                        audio_segments = []
-                        for num, wav_path in sorted_files:
-                            with wave.open(wav_path, "rb") as wf:
-                                audio_segments.append(wf.readframes(wf.getnframes()))
-
-                        full_audio_path = audio_dir / "full_audio.wav"
-                        with wave.open(str(full_audio_path), "wb") as wf:
-                            wf.setnchannels(1)
-                            wf.setsampwidth(2)
-                            wf.setframerate(24000)
-                            for segment in audio_segments:
-                                wf.writeframes(segment)
-
-                        st.session_state.audio_files["full"] = str(full_audio_path)
-                        st.success(f"✅ 音声ファイルを1本に結合: {full_audio_path.name}")
-                except Exception as combine_err:
-                    st.warning(f"⚠️ 音声結合に失敗（個別ファイルを使用）: {combine_err}")
+        # STEP 2: BGM生成
+        bgm_result = {"files": {"bgm": None}}
+        if generate_bgm:
+            bgm_result = run_step_bgm(script, prompts, output_dir, history_entry)
         else:
-            # セリフ数に基づく警告
-            total_lines = len(script.lines) if script.lines else 0
-            estimated_time = total_lines * 7  # 約7秒/セリフ（6秒待機 + 処理）
-            estimated_minutes = estimated_time // 60
-
-            status.text("🎤 音声を生成中...")
-            # 待機時間を12秒に設定（レート制限回避）
-            wait_seconds = 12
-            estimated_time = total_lines * (wait_seconds + 2)  # 生成時間も考慮
-            estimated_minutes = estimated_time // 60
-
-            if total_lines > 30:
-                st.warning(f"⚠️ セリフ数: {total_lines}行 - 時間がかかります")
-            st.info(f"💡 予想所要時間: 約{estimated_minutes}分（レート制限対策のため各セリフ間に{wait_seconds}秒待機）")
-
-            try:
-                tts = TTSClient()
-
-                # 既存の音声ファイルをチェック（途中再開用）
-                existing_audio = {}
-                for wav_file in sorted(audio_dir.glob("*.wav")):
-                    if wav_file.name != "full_audio.wav":
-                        try:
-                            num = int(wav_file.stem.split("_")[0])
-                            existing_audio[num] = str(wav_file)
-                        except (ValueError, IndexError):
-                            pass
-
-                if existing_audio:
-                    st.info(f"♻️ 既存の音声ファイル {len(existing_audio)}件を検出しました（途中再開）")
-                    st.session_state.audio_files.update(existing_audio)
-
-                if audio_mode == "batch":
-                    # 一括生成モード
-                    def update_progress(current, total, message):
-                        progress.progress((current + 1) / (total * 4))
-                        status.text(f"🎤 生成中: {current + 1}/{total} - {message}")
-
-                        # 進捗を定期的に履歴に保存（5件ごと）
-                        if history_entry and (current + 1) % 5 == 0:
-                            # ディスクから生成済みファイルを検出して保存
-                            for wav_file in sorted(audio_dir.glob("*.wav")):
-                                if wav_file.name != "full_audio.wav":
-                                    try:
-                                        num = int(wav_file.stem.split("_")[0])
-                                        st.session_state.audio_files[num] = str(wav_file)
-                                    except (ValueError, IndexError):
-                                        pass
-                            if st.session_state.audio_files:
-                                history_entry["files"]["audio_files"] = dict(st.session_state.audio_files)
-                                add_history_entry(history_entry)
-
-                    output_path = audio_dir / "full_audio.wav"
-                    # Gemini TTSのみ使用（レート制限時は自動リトライ）
-                    wav_path = tts.synthesize_script(
-                        script, output_path,
-                        progress_callback=update_progress,
-                        allow_fallback=False
-                    )
-                    st.session_state.audio_files["full"] = str(wav_path)
-                else:
-                    # 個別生成モード
-                    for i, line in enumerate(script.lines):
-                        output_path = audio_dir / f"{line.number:03d}_{line.speaker}.wav"
-                        wav_path = tts.synthesize(line.text, line.speaker, output_path)
-                        st.session_state.audio_files[line.number] = str(wav_path)
-                        progress.progress((i + 1) / (script.total_lines * 4))
-            except BaseException as audio_err:
-                if _is_streamlit_exception(audio_err):
-                    _pending_streamlit_exception = audio_err
-                audio_error_occurred = True
-                error_str = str(audio_err)
-
-                # エラーログ記録（必ず実行）
-                try:
-                    log_error_to_file(output_dir, "音声生成エラー", error_str, traceback.format_exc())
-                except Exception as log_err:
-                    st.warning(f"⚠️ エラーログ記録失敗: {log_err}")
-
-                # エラーメッセージ表示（日本語「レート制限」も検出）
-                error_lower = error_str.lower()
-                is_rate_limit = any(x in error_lower for x in ["クォータ", "quota", "429", "rate", "limit"]) or "レート制限" in error_str
-                if is_rate_limit:
-                    st.error("❌ 音声生成がレート制限に達しました")
-                    st.warning("⚠️ Gemini TTSの制限に達しました。生成済みの音声は保存されています。")
-                else:
-                    st.error(f"❌ 音声生成エラー: {audio_err}")
-
-                # 生成済みファイルを検出して保存（個別ファイルを確実に検出）
-                if audio_dir.exists():
-                    for wav_file in sorted(audio_dir.glob("*.wav")):
-                        if wav_file.name == "full_audio.wav":
-                            st.session_state.audio_files["full"] = str(wav_file)
-                        else:
-                            try:
-                                num = int(wav_file.stem.split("_")[0])
-                                st.session_state.audio_files[num] = str(wav_file)
-                            except (ValueError, IndexError):
-                                pass
-
-                generated_count = len(st.session_state.audio_files)
-                if generated_count > 0:
-                    st.info(f"💾 生成済み音声: {generated_count}件を保存しました。")
-                    st.success(f"✅ 音声ファイルは {audio_dir} に保存されています。")
-
-                    # 即座に履歴を更新（セッション切断に備える）
-                    if history_entry:
-                        history_entry["progress"]["audio_generated"] = True
-                        history_entry["files"]["audio_files"] = dict(st.session_state.audio_files)
-                        history_entry["error"] = history_entry.get("error", "") + f"音声生成エラー({generated_count}件生成済み); "
-                        add_history_entry(history_entry)
-                else:
-                    st.warning("⚠️ 音声は生成できませんでした。")
-
-        progress.progress(0.25)
-
-        # 履歴更新: 音声生成（正常完了時）
-        if history_entry and not audio_error_occurred:
-            if st.session_state.audio_files:
-                history_entry["progress"]["audio_generated"] = True
-                history_entry["files"]["audio_files"] = dict(st.session_state.audio_files)
-            add_history_entry(history_entry)
-
-        # ステップ2: BGM生成（画像より先に実行 - タイムアウト対策）
-        bgm_path = None
-        bgm_dir = output_dir / "bgm"
-        bgm_dir.mkdir(exist_ok=True)
-
-        try:
-            if not generate_bgm:
-                st.info("⏭️ BGM生成をスキップしました")
-                # 再利用モードの場合は既存のBGMをコピー
-                if st.session_state.reuse_mode["enabled"] and st.session_state.reuse_mode["bgm"]:
-                    src_bgm = Path(st.session_state.reuse_mode["bgm"])
-                    if src_bgm.exists():
-                        dst_bgm = bgm_dir / src_bgm.name
-                        if src_bgm.resolve() != dst_bgm.resolve():
-                            shutil.copy2(src_bgm, dst_bgm)
-                        bgm_path = dst_bgm
-                        st.success(f"♻️ 既存のBGMファイルをコピー: {bgm_path.name}")
-            else:
-                # 再利用モードのチェック
-                if st.session_state.reuse_mode["enabled"] and st.session_state.reuse_mode["bgm"]:
-                    status.text("♻️ 既存のBGMをコピー中...")
-                    src_bgm = Path(st.session_state.reuse_mode["bgm"])
-                    if src_bgm.exists():
-                        dst_bgm = bgm_dir / src_bgm.name
-                        if src_bgm.resolve() != dst_bgm.resolve():
-                            shutil.copy2(src_bgm, dst_bgm)
-                        bgm_path = dst_bgm
-                        st.success(f"♻️ 既存のBGMファイルをコピー: {bgm_path.name}")
-                    else:
-                        st.warning("⚠️ 既存のBGMファイルが見つかりません。新規生成します。")
-
-                if bgm_path is None:
-                    status.text("🎵 BGMを生成中...")
-
-                    # 動画の長さを計算（優先順位: 音声 > プロンプト > デフォルト）
-                    total_duration = 60  # デフォルト
-
-                    # 音声ファイルから長さを取得
-                    if st.session_state.audio_files:
-                        try:
-                            if "full" in st.session_state.audio_files:
-                                audio_path = st.session_state.audio_files["full"]
-                            else:
-                                # 個別ファイルの合計時間を計算
-                                audio_path = list(st.session_state.audio_files.values())[0]
-
-                            from moviepy import AudioFileClip
-                            clip = AudioFileClip(audio_path)
-                            if "full" in st.session_state.audio_files:
-                                total_duration = clip.duration
-                            else:
-                                # 個別ファイルの場合は推定（各ファイル × 件数）
-                                total_duration = clip.duration * len(st.session_state.audio_files)
-                            clip.close()
-                            st.info(f"🎵 音声から長さを検出: {total_duration:.1f}秒")
-                        except Exception:
-                            pass
-
-                    # 音声がない場合はプロンプトから
-                    if total_duration == 60 and prompts.prompts:
-                        last_prompt = prompts.prompts[-1]
-                        total_duration = time_to_seconds(last_prompt.end_time)
-
-                    bgm_path = bgm_dir / "background_music.mp3"
-                    try:
-                        bgm_client = BeatovenClient()
-                        bgm_client.generate(int(total_duration), bgm_path)
-                        # ファイルが実際に作成されたか確認
-                        if not bgm_path.exists():
-                            st.warning("⚠️ BGMファイルが作成されませんでした（スキップ）")
-                            bgm_path = None
-                        else:
-                            st.success(f"✅ BGM生成完了: {bgm_path.name}")
-                    except Exception as bgm_err:
-                        log_error_to_file(output_dir, "BGM生成エラー", str(bgm_err), traceback.format_exc())
-                        st.warning(f"⚠️ BGM生成に失敗（スキップ）: {bgm_err}")
-                        bgm_path = None
-        except BaseException as bgm_step_err:
-            if _is_streamlit_exception(bgm_step_err):
-                _pending_streamlit_exception = _pending_streamlit_exception or bgm_step_err
-            else:
-                log_error_to_file(output_dir, "BGMステップエラー", str(bgm_step_err), traceback.format_exc())
-                st.error(f"❌ BGMステップでエラー: {bgm_step_err}")
-
-        progress.progress(0.35)
-
-        # 履歴更新: BGM生成完了
-        if history_entry:
-            history_entry["progress"]["bgm_generated"] = True
-            history_entry["files"]["bgm"] = str(bgm_path) if bgm_path else None
-            add_history_entry(history_entry)
-
-        # ステップ3: 背景動画のダウンロード（画像より先に実行 - タイムアウト対策）
-        background_videos = {}
-        try:
-            if not generate_bg_video:
-                st.info("⏭️ 背景動画の取得をスキップしました")
-            else:
-                video_dir = output_dir / "videos" / "backgrounds"
-                video_dir.mkdir(parents=True, exist_ok=True)
-
-                # 再利用モードの場合、既存の動画をコピー
-                reused_video_count = 0
-                if st.session_state.reuse_mode["enabled"] and st.session_state.reuse_mode.get("videos"):
-                    status.text("♻️ 既存の動画をコピー中...")
-                    for num, src_path in st.session_state.reuse_mode["videos"].items():
-                        src_file = Path(src_path)
-                        if src_file.exists():
-                            dst_file = video_dir / src_file.name
-                            if src_file.resolve() != dst_file.resolve():
-                                shutil.copy2(src_file, dst_file)
-                            background_videos[num] = str(dst_file)
-                            reused_video_count += 1
-
-                    if reused_video_count > 0:
-                        st.success(f"♻️ 既存の動画: {reused_video_count}本をコピーしました")
-
-                # 再利用で全て揃っていない場合は新規取得
-                if not background_videos:
-                    status.text("🎥 背景動画を検索中...")
-                    stock_client = StockVideoClient()
-
-                    # 日本語→英語キーワードマッピング（Pexels/Pixabayは英語検索が必要）
-                    _jp_to_en = {
-                        "不動産": "real estate", "投資": "investment", "マンション": "apartment building",
-                        "金利": "interest rate", "経済": "economy", "お金": "money finance",
-                        "株": "stock market", "ビジネス": "business office", "会議": "meeting",
-                        "グラフ": "chart graph", "上昇": "growth arrow", "下降": "decline",
-                        "都市": "city skyline", "建物": "building architecture", "家": "house home",
-                        "人": "people", "女性": "woman", "男性": "man", "笑顔": "smile happy",
-                        "驚": "surprised", "怒": "angry", "悲": "sad", "喜": "happy celebration",
-                        "炎": "fire flame", "水": "water ocean", "空": "sky clouds",
-                        "夜": "night city", "朝": "morning sunrise", "自然": "nature landscape",
-                        "テクノロジー": "technology", "コンピュータ": "computer", "データ": "data digital",
-                        "選挙": "election voting", "政治": "politics government", "ニュース": "news broadcast",
-                        "食事": "food dining", "料理": "cooking kitchen", "スーパー": "supermarket shopping",
-                        "工場": "factory industrial", "半導体": "semiconductor technology",
-                        "インフレ": "inflation economy", "価格": "price tag", "給料": "salary paycheck",
-                    }
-
-                    def _to_english_query(text: str) -> str:
-                        """日本語プロンプトから英語検索クエリを生成"""
-                        matches = []
-                        for jp, en in _jp_to_en.items():
-                            if jp in text:
-                                matches.append(en)
-                        if matches:
-                            return " ".join(matches[:3])
-                        # マッチしない場合は汎用キーワード
-                        return "abstract background motion"
-
-                    # チャプター（話題の切り替わり）を検出して、チャプターごとに1本の背景動画を取得
-                    import re as _re
-                    chapter_pattern = _re.compile(r'【[\d:]+〜\s*(.+?)】')
-
-                    # 台本またはプロンプトファイルからチャプターヘッダーを検出
-                    raw_content = st.session_state.get("prompt_raw_content", "") or st.session_state.get("script_raw_content", "")
-                    chapters = chapter_pattern.findall(raw_content)
-
-                    if chapters:
-                        # チャプターごとに1本（例: "オープニング：低金利の甘い罠" → 英語検索）
-                        search_items = [(i + 1, _to_english_query(ch)) for i, ch in enumerate(chapters)]
-                        st.info(f"📑 {len(chapters)}個のチャプターを検出 → チャプターごとに背景動画を取得")
-                    elif prompts.prompts:
-                        # チャプター未検出時はプロンプトから最大5本に制限
-                        step = max(1, len(prompts.prompts) // 5)
-                        selected = prompts.prompts[::step][:5]
-                        search_items = [(p.number, _to_english_query(p.prompt)) for p in selected]
-                    elif script and script.lines:
-                        step = max(1, len(script.lines) // 5)
-                        selected = script.lines[::step][:5]
-                        search_items = [(i + 1, _to_english_query(line.text)) for i, line in enumerate(selected)]
-                    else:
-                        search_items = [(1, "abstract background")]
-
-                    for i, (number, search_query) in enumerate(search_items):
-                        try:
-                            status.text(f"🎥 背景動画検索中: {i + 1}/{len(search_items)}")
-
-                            # Pexelsで動画を検索
-                            videos = stock_client.search_pexels(search_query, per_page=1)
-
-                            if videos:
-                                video_path = video_dir / f"{number:03d}_bg.mp4"
-                                stock_client.download(videos[0], video_path)
-                                background_videos[number] = str(video_path)
-                                st.success(f"✅ 背景動画 {number} ダウンロード完了")
-                            else:
-                                # Pixabayにフォールバック
-                                videos = stock_client.search_pixabay(search_query, per_page=1)
-                                if videos:
-                                    video_path = video_dir / f"{number:03d}_bg.mp4"
-                                    stock_client.download(videos[0], video_path)
-                                    background_videos[number] = str(video_path)
-                                    st.success(f"✅ 背景動画 {number} ダウンロード完了 (Pixabay)")
-
-                        except Exception as vid_err:
-                            log_error_to_file(output_dir, f"背景動画取得エラー（{number}）", str(vid_err), traceback.format_exc())
-                            st.warning(f"⚠️ 背景動画取得エラー（{number}）: {vid_err}")
-
-                        progress.progress(0.35 + (i + 1) / (len(search_items) * 8))
-
-                if background_videos:
-                    st.success(f"✅ 背景動画: {len(background_videos)}件準備完了")
-                else:
-                    st.info("ℹ️ 背景動画なしで続行します")
-        except BaseException as bg_err:
-            if _is_streamlit_exception(bg_err):
-                _pending_streamlit_exception = _pending_streamlit_exception or bg_err
-            else:
-                log_error_to_file(output_dir, "背景動画取得エラー", str(bg_err), traceback.format_exc())
-            st.warning(f"⚠️ 背景動画の取得中にエラー: {bg_err}")
-
-        progress.progress(0.5)
-
-        # ステップ4: 画像生成（最も時間がかかるため最後に実行）
-        generated_images = {}
-        reused_count = 0
-        generated_count = 0
-
-        try:  # 画像生成を独立したtry/exceptでラップ
-            if not generate_images:
-                st.info("⏭️ 画像生成をスキップしました")
-                progress.progress(0.75)
-            else:
-                # 再利用モードの場合、既存の画像をコピー
-                if st.session_state.reuse_mode["enabled"] and st.session_state.reuse_mode["images"]:
-                    status.text("♻️ 既存の画像をコピー中...")
-                    image_dir = output_dir / "images"
-                    image_dir.mkdir(exist_ok=True)
-
-                    for num, src_path in st.session_state.reuse_mode["images"].items():
-                        src_file = Path(src_path)
-                        if src_file.exists():
-                            dst_file = image_dir / src_file.name
-                            if src_file.resolve() != dst_file.resolve():
-                                shutil.copy2(src_file, dst_file)
-                            generated_images[num] = str(dst_file)
-                        else:
-                            generated_images[num] = src_path  # 元のパスを保持
-
-                    reused_count = len(generated_images)
-                    st.success(f"♻️ 既存の画像: {reused_count}枚をコピーしました")
-
-                # 画像プロンプトがない場合のみ自動生成（アップロード済みプロンプトは尊重）
-                user_specified = st.session_state.get("user_specified_num_images", 0)
-                should_regenerate = prompts.total_images == 0
-
-                if should_regenerate:
-                    if user_specified > 0:
-                        # ユーザー指定があればそれを使用
-                        calculated_images = user_specified
-                        st.info(f"🎨 {calculated_images}件の画像プロンプトを自動生成中（ユーザー指定）...")
-                    else:
-                        # 台本から項数を検出して画像枚数を決定（生コンテンツから）
-                        raw_content = st.session_state.get("script_raw_content", "")
-                        if raw_content:
-                            detected_items = count_script_items_from_content(raw_content)
-                        else:
-                            detected_items = count_script_items(script)
-
-                        if detected_items == 0:
-                            detected_items = script.total_lines
-
-                        # ゼロ除算防止: 最低1枚は生成
-                        if detected_items <= 0:
-                            detected_items = max(1, len(script.lines) if script.lines else 1)
-
-                        calculated_images = max(1, min(detected_items, 100))
-                        st.info(f"🎨 {calculated_images}件の画像プロンプトを自動生成中（検出された項数: {detected_items}）...")
-                    try:
-                        auto_prompts = generate_image_prompts_from_script(script, calculated_images)
-                        prompts = auto_prompts
-                        st.session_state.prompts = auto_prompts
-                        st.success(f"✅ {prompts.total_images}件の画像プロンプトを自動生成しました")
-                    except Exception as auto_err:
-                        st.warning(f"⚠️ 画像プロンプト自動生成エラー: {auto_err}")
-                        st.info("💡 手動で画像プロンプトファイルをアップロードしてください")
-
-                # 画像生成（プロンプトがある場合のみ）
-                if prompts.total_images > 0:
-                    # 不足している画像を特定
-                    missing_prompts = [p for p in prompts.prompts if p.number not in generated_images]
-
-                    if missing_prompts:
-                        st.info(f"🖼️ 不足している画像: {len(missing_prompts)}枚を新規生成します...")
-                        image_gen = ImageGenerator()
-                        image_dir = output_dir / "images"
-                        image_dir.mkdir(exist_ok=True)
-                        stock_client = StockVideoClient()
-
-                        image_errors = []
-                        for i, p in enumerate(missing_prompts):
-                            try:
-                                status.text(f"🖼️ 画像生成中: {i + 1}/{len(missing_prompts)} - {p.prompt[:30]}...")
-                                output_path = image_dir / f"{p.number:03d}_scene.png"
-                                image_gen.generate(p.prompt, output_path)
-                                generated_images[p.number] = str(output_path)
-                                generated_count += 1
-                            except Exception as img_err:
-                                log_error_to_file(output_dir, f"画像生成エラー（画像 {p.number}）", str(img_err), traceback.format_exc())
-                                image_errors.append(p.number)
-                                # AI生成失敗時はPexelsからストック画像を取得
-                                try:
-                                    stock_path = image_dir / f"{p.number:03d}_stock.jpg"
-                                    keywords = p.prompt.split()[:3]
-                                    search_query = " ".join(keywords) if keywords else "background"
-                                    stock_client.download_image(search_query, stock_path)
-                                    generated_images[p.number] = str(stock_path)
-                                    generated_count += 1
-                                except Exception as stock_err:
-                                    log_error_to_file(output_dir, f"ストック画像取得エラー（画像 {p.number}）", str(stock_err), traceback.format_exc())
-                            progress.progress(0.5 + (i + 1) / (len(missing_prompts) * 4))
-
-                        # 画像生成結果をまとめて表示（ループ中のUI更新を最小化）
-                        if image_errors:
-                            st.warning(f"⚠️ {len(image_errors)}枚の画像でAI生成エラー（ストック代替済み）: {image_errors}")
-                    else:
-                        st.success(f"♻️ 全ての画像が既存のものを再利用できます（{reused_count}枚）")
-
-                    # 画像生成結果サマリー
-                    if generated_images:
-                        st.success(f"✅ 画像準備完了: 再利用 {reused_count}枚 + 新規生成 {generated_count}枚 = 合計 {len(generated_images)}枚")
-                    else:
-                        st.error("❌ 画像を生成できませんでした")
-                else:
-                    st.error("❌ 画像プロンプトがないため、画像生成をスキップしました")
-
-                progress.progress(0.75)
-        except BaseException as img_err:
-            if _is_streamlit_exception(img_err):
-                _pending_streamlit_exception = _pending_streamlit_exception or img_err
-            else:
-                log_error_to_file(output_dir, "画像生成エラー", str(img_err), traceback.format_exc())
-                st.error(f"❌ 画像生成エラー: {img_err}")
-            progress.progress(0.75)
-
-        # 履歴更新: 画像生成完了
-        if history_entry:
-            history_entry["progress"]["images_generated"] = True
-            history_entry["files"]["images"] = {str(k): v for k, v in generated_images.items()}
-            add_history_entry(history_entry)
-
-        # ステップ5: Filmoraモードの場合はタイムライン生成
-        if "Filmora" in mode:
-            status.text("📋 タイムラインを生成中...")
-            timeline = Timeline()
-
-            # 音声エントリ追加
-            def get_audio_duration(audio_path: str) -> float:
-                """音声ファイルの長さを取得（エラー時はフォールバック）"""
-                try:
-                    from moviepy import AudioFileClip
-                    clip = AudioFileClip(audio_path)
-                    duration = clip.duration
-                    clip.close()
-                    return duration if duration else 5.0
-                except Exception as e:
-                    st.warning(f"⚠️ 音声長さ取得エラー: {e}")
-                    # フォールバック: ファイルサイズから推定（16bit 24kHz mono）
-                    import os
-                    try:
-                        file_size = os.path.getsize(audio_path)
-                        # WAV: 48000 bytes/sec (24000Hz * 2bytes * 1ch)
-                        return max(1.0, file_size / 48000)
-                    except:
-                        return 5.0  # デフォルト5秒
-
-            # 音声ファイルがある場合のみ音声エントリを追加
-            audio_total_duration = 0.0
-            if st.session_state.audio_files:
-                if "full" in st.session_state.audio_files:
-                    # 一括生成モード: 1つの音声ファイル
-                    audio_path = st.session_state.audio_files["full"]
-                    duration = get_audio_duration(audio_path)
-
-                    timeline.add_entry(TimelineEntry(
-                        start_time=0.0,
-                        end_time=duration,
-                        media_type="audio",
-                        file_path=audio_path,
-                        speaker="all",
-                    ))
-                    audio_total_duration = duration
-                else:
-                    # 個別生成モード: 各セリフごとのファイル
-                    current_time = 0.0
-                    for line in script.lines:
-                        if line.number in st.session_state.audio_files:
-                            audio_path = st.session_state.audio_files[line.number]
-                            duration = get_audio_duration(audio_path)
-
-                            timeline.add_entry(TimelineEntry(
-                                start_time=current_time,
-                                end_time=current_time + duration,
-                                media_type="audio",
-                                file_path=audio_path,
-                                speaker=line.speaker,
-                            ))
-                            current_time += duration
-                    audio_total_duration = current_time
-            else:
-                st.warning("⚠️ 音声ファイルがありません。画像のみのタイムラインを生成します。")
-
-            # 画像エントリ追加（音声の長さに合わせてスケーリング、音声がない場合はプロンプト時間をそのまま使用）
-            if prompts.prompts:
-                last_prompt = prompts.prompts[-1]
-                prompt_total_duration = time_to_seconds(last_prompt.end_time)
-            else:
-                # プロンプトがない場合はデフォルト（画像1枚5秒）
-                prompt_total_duration = len(generated_images) * 5.0 if generated_images else 10.0
-
-            # 音声がある場合はスケーリング、ない場合はプロンプト時間をそのまま使用
-            if audio_total_duration > 0 and prompt_total_duration > 0:
-                time_scale = audio_total_duration / prompt_total_duration
-            else:
-                time_scale = 1.0  # 音声がない場合はスケーリングなし
-
-            for p in prompts.prompts:
-                if p.number in generated_images:
-                    scaled_start = time_to_seconds(p.start_time) * time_scale
-                    scaled_end = time_to_seconds(p.end_time) * time_scale
-
-                    timeline.add_entry(TimelineEntry(
-                        start_time=scaled_start,
-                        end_time=scaled_end,
-                        media_type="image",
-                        file_path=generated_images[p.number],
-                    ))
-
-            # BGMエントリ追加
-            if bgm_path and bgm_path.exists():
-                timeline.add_entry(TimelineEntry(
-                    start_time=0,
-                    end_time=timeline.total_duration,
-                    media_type="bgm",
-                    file_path=str(bgm_path),
-                ))
-
-            # CSV出力
-            timeline.to_csv(output_dir / "timeline.csv")
-
+            st.info("⏭️ BGM生成をスキップしました")
+            # 再利用モードの場合は既存のBGMをコピー
+            if st.session_state.reuse_mode["enabled"] and st.session_state.reuse_mode["bgm"]:
+                bgm_dir = output_dir / "bgm"
+                bgm_dir.mkdir(exist_ok=True)
+                src_bgm = Path(st.session_state.reuse_mode["bgm"])
+                if src_bgm.exists():
+                    dst_bgm = bgm_dir / src_bgm.name
+                    if src_bgm.resolve() != dst_bgm.resolve():
+                        shutil.copy2(src_bgm, dst_bgm)
+                    bgm_result["files"]["bgm"] = str(dst_bgm)
+                    st.success(f"♻️ 既存のBGMファイルをコピー: {dst_bgm.name}")
+        overall_progress.progress(0.35)
+
+        # STEP 3: 背景動画
+        bg_result = {"files": {"videos": {}}}
+        if generate_bg_video:
+            bg_result = run_step_bg_video(script, prompts, output_dir, history_entry)
         else:
-            # 自動モード: 動画を合成
-            status.text("🎬 動画を合成中...")
-            editor = VideoEditor()
-            timeline = Timeline()
+            st.info("⏭️ 背景動画の取得をスキップしました")
+        overall_progress.progress(0.5)
 
-            # 音声がない場合は素材のみ保存して終了
-            if not st.session_state.audio_files:
-                st.warning("⚠️ 音声がないため、動画合成をスキップします。")
-                st.info("💡 画像素材は保存されています。「📜 生成履歴」から確認できます。")
-                progress.progress(1.0)
-                status.text("✅ 素材生成完了（音声なし）")
+        # STEP 4: 画像生成
+        img_result = {"files": {"images": {}}}
+        if generate_images:
+            img_result = run_step_images(script, prompts, output_dir, history_entry)
+        else:
+            st.info("⏭️ 画像生成をスキップしました")
+        overall_progress.progress(0.75)
 
-                # 履歴更新: 素材生成完了（動画なし）
-                if history_entry:
-                    history_entry["status"] = "completed"
-                    history_entry["error"] = history_entry.get("error", "") + "音声なしのため動画合成スキップ"
-                    add_history_entry(history_entry)
+        # STEP 5: タイムライン/動画合成
+        bgm_path_str = bgm_result["files"].get("bgm")
+        bgm_path = Path(bgm_path_str) if bgm_path_str else None
+        generated_images = img_result["files"].get("images", {})
+        background_videos = bg_result["files"].get("videos", {})
 
-                st.session_state.generation_complete = True
-                st.rerun()
-                return
-
-            # 音声ファイルの長さを取得（エラー時はフォールバック）
-            def get_audio_duration_auto(audio_path: str) -> float:
-                try:
-                    from moviepy import AudioFileClip
-                    clip = AudioFileClip(audio_path)
-                    duration = clip.duration
-                    clip.close()
-                    return duration if duration else 5.0
-                except Exception as e:
-                    st.warning(f"⚠️ 音声長さ取得エラー: {e}")
-                    import os
-                    try:
-                        file_size = os.path.getsize(audio_path)
-                        return max(1.0, file_size / 48000)
-                    except:
-                        return 5.0
-
-            if "full" in st.session_state.audio_files:
-                # 一括生成モード
-                audio_path = st.session_state.audio_files["full"]
-                duration = get_audio_duration_auto(audio_path)
-
-                timeline.add_entry(TimelineEntry(
-                    start_time=0.0,
-                    end_time=duration,
-                    media_type="audio",
-                    file_path=audio_path,
-                    speaker="all",
-                ))
-            else:
-                # 個別生成モード
-                current_time = 0.0
-                for line in script.lines:
-                    if line.number in st.session_state.audio_files:
-                        audio_path = st.session_state.audio_files[line.number]
-                        duration = get_audio_duration_auto(audio_path)
-
-                        timeline.add_entry(TimelineEntry(
-                            start_time=current_time,
-                            end_time=current_time + duration,
-                            media_type="audio",
-                            file_path=audio_path,
-                            speaker=line.speaker,
-                        ))
-                        current_time += duration
-
-            # 音声の実際の長さを取得
-            audio_total_duration = timeline.total_duration
-
-            # 画像プロンプトの元の総時間を計算
-            if prompts.prompts:
-                last_prompt = prompts.prompts[-1]
-                prompt_total_duration = time_to_seconds(last_prompt.end_time)
-            else:
-                prompt_total_duration = audio_total_duration
-
-            # スケール係数を計算（音声の長さ / プロンプトの総時間）
-            if prompt_total_duration > 0:
-                time_scale = audio_total_duration / prompt_total_duration
-            else:
-                time_scale = 1.0
-
-            st.info(f"📊 タイミング調整: 音声 {audio_total_duration:.1f}秒 / プロンプト {prompt_total_duration:.1f}秒 = スケール {time_scale:.2f}x")
-
-            for p in prompts.prompts:
-                if p.number in generated_images:
-                    # 時間をスケーリングして音声に合わせる
-                    scaled_start = time_to_seconds(p.start_time) * time_scale
-                    scaled_end = time_to_seconds(p.end_time) * time_scale
-
-                    # 背景動画があれば追加
-                    if p.number in background_videos:
-                        timeline.add_entry(TimelineEntry(
-                            start_time=scaled_start,
-                            end_time=scaled_end,
-                            media_type="video",
-                            file_path=background_videos[p.number],
-                        ))
-
-                    # 画像を追加（背景動画の上にオーバーレイ）
-                    timeline.add_entry(TimelineEntry(
-                        start_time=scaled_start,
-                        end_time=scaled_end,
-                        media_type="image",
-                        file_path=generated_images[p.number],
-                    ))
-
-            # デバッグ: 動画生成前の状態確認
-            st.info(f"📊 タイムライン: {len(timeline.entries)}エントリ, 合計{timeline.total_duration:.1f}秒")
-            st.info(f"🖼️ 生成画像: {len(generated_images)}枚, 出力形式: {output_formats}")
-
-            # 画像がない場合は動画生成をスキップ
-            if not generated_images:
-                st.error("❌ 画像が生成されていないため、動画を作成できません。")
-                st.info("💡 画像プロンプトファイルをアップロードするか、API設定を確認してください。")
-                progress.progress(1.0)
-                status.text("⚠️ 画像なしのため動画生成をスキップ")
-                return
-
-            # 出力形式がない場合もスキップ
-            if not output_formats:
-                st.error("❌ 出力形式が選択されていません。")
-                progress.progress(1.0)
-                status.text("⚠️ 出力形式未選択のため動画生成をスキップ")
-                return
-
-            # 各フォーマットで動画出力
-            video_dir = output_dir / "videos"
-            video_dir.mkdir(exist_ok=True)
-
-            for i, fmt in enumerate(output_formats):
-                status.text(f"🎬 動画を合成中... ({i+1}/{len(output_formats)}: {fmt})")
-                output_path = video_dir / f"{fmt}.mp4"
-                try:
-                    editor.create_video(
-                        timeline=timeline,
-                        output_path=output_path,
-                        format_name=fmt,
-                        bgm_path=bgm_path,
-                    )
-                    st.success(f"✅ {fmt}.mp4 を生成しました")
-                except Exception as video_err:
-                    log_error_to_file(output_dir, f"動画生成エラー（{fmt}）", str(video_err), traceback.format_exc())
-                    st.error(f"❌ {fmt} 動画生成エラー: {video_err}")
-                    st.code(traceback.format_exc())
-
-        # 中断が保留されている場合、ここで再送出（全ステップ完了後）
-        if _pending_streamlit_exception is not None:
-            if history_entry:
-                history_entry["status"] = "interrupted"
-                history_entry["error"] = "一部ステップ中断（残りは続行済み）"
-                add_history_entry(history_entry)
-            raise _pending_streamlit_exception
-
-        progress.progress(1.0)
-        status.text("✅ 生成完了！")
-
-        # 履歴更新: 動画生成完了（全体完了）
-        if history_entry:
-            history_entry["progress"]["video_generated"] = True
-            history_entry["status"] = "completed"
-            add_history_entry(history_entry)
+        run_step_timeline(
+            script, prompts, mode, output_formats, output_dir,
+            generated_images, background_videos, bgm_path, history_entry,
+        )
+        overall_progress.progress(1.0)
 
         # 再開モードをリセット
         st.session_state.resume_mode = {"enabled": False, "entry": None}
         st.session_state.current_history_id = None
-
         st.session_state.generation_complete = True
         st.rerun()
 
@@ -2602,46 +2704,32 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
         error_msg = str(e)
         error_trace = traceback.format_exc()
 
-        # Streamlitの内部リラン例外はそのまま再送出（正常動作）
+        # Streamlitの内部リラン例外はそのまま再送出
         exception_type = type(e).__name__
         if "Rerun" in exception_type or "StopException" in exception_type:
-            # リラン前に履歴を保存
             if history_entry and history_entry.get("status") == "in_progress":
                 history_entry["status"] = "interrupted"
-                history_entry["error"] = "Streamlitセッション中断（ページ操作による再実行）"
-                if output_dir:
-                    log_error_to_file(output_dir, "セッション中断", "ページ操作により生成が中断されました", exception_type)
+                history_entry["error"] = "Streamlitセッション中断"
                 try:
                     add_history_entry(history_entry)
                 except Exception:
                     pass
             raise
 
-        # エラーをログファイルに記録
         if output_dir:
             log_error_to_file(output_dir, "生成処理エラー", error_msg, error_trace)
 
         st.error(f"❌ 生成エラー: {error_msg}")
         st.code(error_trace)
 
-        # 履歴更新: 中断（エラー情報を保存）
         if history_entry:
             history_entry["status"] = "interrupted"
             history_entry["error"] = error_msg
             history_entry["error_trace"] = error_trace[:500]
             add_history_entry(history_entry)
             st.warning("⚠️ 生成が中断されました。「📜 生成履歴」から再開できます。")
-        else:
-            try:
-                emergency_entry = create_history_entry(str(output_dir) if output_dir else "unknown")
-                emergency_entry["status"] = "interrupted"
-                emergency_entry["error"] = error_msg
-                add_history_entry(emergency_entry)
-            except Exception:
-                pass
 
     finally:
-        # 最終保存（中断状態の履歴が必ず保存されるように）
         if history_entry and history_entry.get("status") == "in_progress":
             history_entry["status"] = "interrupted"
             history_entry["error"] = "予期せぬ中断"
