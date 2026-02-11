@@ -801,6 +801,8 @@ def main_page() -> None:
         st.session_state.step_mode = True
     if "_last_script_name" not in st.session_state:
         st.session_state._last_script_name = ""
+    if "_pending_step" not in st.session_state:
+        st.session_state._pending_step = None
 
     # 履歴セクション（常に表示）
     with st.expander("📜 生成履歴", expanded=True):
@@ -1630,6 +1632,35 @@ def main_page() -> None:
                         step_history["files"]["prompts_file"] = str(prompts_file)
                 add_history_entry(step_history)
 
+            # --- 実行予約の処理（ボタンではなくフラグで駆動） ---
+            pending_step = st.session_state.get("_pending_step")
+            if pending_step:
+                st.session_state._pending_step = None
+                try:
+                    if pending_step == "audio":
+                        run_step_audio(script, step_output_dir, step_history)
+                    elif pending_step == "bgm":
+                        run_step_bgm(script, prompts, step_output_dir, step_history)
+                    elif pending_step == "bg_video":
+                        run_step_bg_video(script, prompts, step_output_dir, step_history)
+                    elif pending_step == "images":
+                        run_step_images(script, prompts, step_output_dir, step_history)
+                    elif pending_step == "timeline":
+                        materials = load_existing_materials(str(step_output_dir))
+                        st.session_state.audio_files = materials["audio_files"]
+                        run_step_timeline(
+                            script, prompts, mode, output_formats, step_output_dir,
+                            materials["images"], materials["videos"],
+                            Path(materials["bgm"]) if materials["bgm"] else None,
+                            step_history,
+                        )
+                        st.session_state.generation_complete = True
+                except Exception as e:
+                    st.error(f"生成エラー: {e}")
+                st.rerun()
+
+            # --- ステップダッシュボード（ボタンはフラグを立てるだけ） ---
+
             # STEP 1: 音声
             s1_icon = "✅" if step_status["audio"] else "⬜"
             audio_count = len(list((step_output_dir / "audio").glob("*.wav"))) if (step_output_dir / "audio").exists() else 0
@@ -1638,14 +1669,11 @@ def main_page() -> None:
             with s1_col2:
                 s1_label = "🔄 再生成" if step_status["audio"] else "▶️ 生成開始"
                 if st.button(s1_label, key="step_audio_btn", use_container_width=True):
-                    try:
-                        if step_status["audio"]:
-                            _clear_step_files(step_output_dir / "audio", ["*.wav"])
-                            st.session_state.audio_files = {}
-                            st.session_state.reuse_mode["audio_files"] = {}
-                        run_step_audio(script, step_output_dir, step_history)
-                    except Exception as e:
-                        st.error(f"音声生成エラー: {e}")
+                    if step_status["audio"]:
+                        _clear_step_files(step_output_dir / "audio", ["*.wav"])
+                        st.session_state.audio_files = {}
+                        st.session_state.reuse_mode["audio_files"] = {}
+                    st.session_state._pending_step = "audio"
                     st.rerun()
 
             # STEP 2: BGM
@@ -1655,13 +1683,10 @@ def main_page() -> None:
             with s2_col2:
                 s2_label = "🔄 再生成" if step_status["bgm"] else "▶️ 生成開始"
                 if st.button(s2_label, key="step_bgm_btn", use_container_width=True):
-                    try:
-                        if step_status["bgm"]:
-                            _clear_step_files(step_output_dir / "bgm", ["*.mp3", "*.wav"])
-                            st.session_state.reuse_mode["bgm"] = None
-                        run_step_bgm(script, prompts, step_output_dir, step_history)
-                    except Exception as e:
-                        st.error(f"BGM生成エラー: {e}")
+                    if step_status["bgm"]:
+                        _clear_step_files(step_output_dir / "bgm", ["*.mp3", "*.wav"])
+                        st.session_state.reuse_mode["bgm"] = None
+                    st.session_state._pending_step = "bgm"
                     st.rerun()
 
             # STEP 3: 背景動画
@@ -1671,13 +1696,10 @@ def main_page() -> None:
             with s3_col2:
                 s3_label = "🔄 再生成" if step_status["bg_video"] else "▶️ 生成開始"
                 if st.button(s3_label, key="step_bg_video_btn", use_container_width=True):
-                    try:
-                        if step_status["bg_video"]:
-                            _clear_step_files(step_output_dir / "videos" / "backgrounds", ["*.mp4"])
-                            st.session_state.reuse_mode["videos"] = {}
-                        run_step_bg_video(script, prompts, step_output_dir, step_history)
-                    except Exception as e:
-                        st.error(f"背景動画取得エラー: {e}")
+                    if step_status["bg_video"]:
+                        _clear_step_files(step_output_dir / "videos" / "backgrounds", ["*.mp4"])
+                        st.session_state.reuse_mode["videos"] = {}
+                    st.session_state._pending_step = "bg_video"
                     st.rerun()
 
             # STEP 4: 画像
@@ -1691,13 +1713,10 @@ def main_page() -> None:
             with s4_col2:
                 s4_label = "🔄 再生成" if step_status["images"] else "▶️ 生成開始"
                 if st.button(s4_label, key="step_images_btn", use_container_width=True):
-                    try:
-                        if step_status["images"]:
-                            _clear_step_files(step_output_dir / "images", ["*.png", "*.jpg"])
-                            st.session_state.reuse_mode["images"] = {}
-                        run_step_images(script, prompts, step_output_dir, step_history)
-                    except Exception as e:
-                        st.error(f"画像生成エラー: {e}")
+                    if step_status["images"]:
+                        _clear_step_files(step_output_dir / "images", ["*.png", "*.jpg"])
+                        st.session_state.reuse_mode["images"] = {}
+                    st.session_state._pending_step = "images"
                     st.rerun()
 
             # STEP 5: タイムライン/動画合成
@@ -1707,24 +1726,10 @@ def main_page() -> None:
             with s5_col2:
                 s5_label = "🔄 再生成" if step_status["timeline"] else "▶️ 生成開始"
                 if st.button(s5_label, key="step_timeline_btn", use_container_width=True):
-                    try:
-                        if step_status["timeline"]:
-                            _clear_step_files(step_output_dir, ["timeline.csv"])
-                            _clear_step_files(step_output_dir / "videos", ["*.mp4"], exclude_subdir="backgrounds")
-                        # ディスクから素材を読み込み
-                        materials = load_existing_materials(str(step_output_dir))
-                        st.session_state.audio_files = materials["audio_files"]
-                        gen_images = materials["images"]
-                        bg_videos = materials["videos"]
-                        bgm = Path(materials["bgm"]) if materials["bgm"] else None
-
-                        run_step_timeline(
-                            script, prompts, mode, output_formats, step_output_dir,
-                            gen_images, bg_videos, bgm, step_history,
-                        )
-                        st.session_state.generation_complete = True
-                    except Exception as e:
-                        st.error(f"タイムライン/動画合成エラー: {e}")
+                    if step_status["timeline"]:
+                        _clear_step_files(step_output_dir, ["timeline.csv"])
+                        _clear_step_files(step_output_dir / "videos", ["*.mp4"], exclude_subdir="backgrounds")
+                    st.session_state._pending_step = "timeline"
                     st.rerun()
 
             st.info(f"📂 出力先: `{step_output_dir}`")
