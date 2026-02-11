@@ -1624,6 +1624,8 @@ def main_page() -> None:
             with s1_col2:
                 s1_label = "🔄 再生成" if step_status["audio"] else "▶️ 生成開始"
                 if st.button(s1_label, key="step_audio_btn", use_container_width=True):
+                    if step_status["audio"]:
+                        _clear_step_files(step_output_dir / "audio", ["*.wav"])
                     run_step_audio(script, step_output_dir, step_history)
                     st.rerun()
 
@@ -1634,6 +1636,8 @@ def main_page() -> None:
             with s2_col2:
                 s2_label = "🔄 再生成" if step_status["bgm"] else "▶️ 生成開始"
                 if st.button(s2_label, key="step_bgm_btn", use_container_width=True):
+                    if step_status["bgm"]:
+                        _clear_step_files(step_output_dir / "bgm", ["*.mp3", "*.wav"])
                     run_step_bgm(script, prompts, step_output_dir, step_history)
                     st.rerun()
 
@@ -1644,6 +1648,8 @@ def main_page() -> None:
             with s3_col2:
                 s3_label = "🔄 再生成" if step_status["bg_video"] else "▶️ 生成開始"
                 if st.button(s3_label, key="step_bg_video_btn", use_container_width=True):
+                    if step_status["bg_video"]:
+                        _clear_step_files(step_output_dir / "videos" / "backgrounds", ["*.mp4"])
                     run_step_bg_video(script, prompts, step_output_dir, step_history)
                     st.rerun()
 
@@ -1658,6 +1664,8 @@ def main_page() -> None:
             with s4_col2:
                 s4_label = "🔄 再生成" if step_status["images"] else "▶️ 生成開始"
                 if st.button(s4_label, key="step_images_btn", use_container_width=True):
+                    if step_status["images"]:
+                        _clear_step_files(step_output_dir / "images", ["*.png", "*.jpg"])
                     run_step_images(script, prompts, step_output_dir, step_history)
                     st.rerun()
 
@@ -1668,6 +1676,9 @@ def main_page() -> None:
             with s5_col2:
                 s5_label = "🔄 再生成" if step_status["timeline"] else "▶️ 生成開始"
                 if st.button(s5_label, key="step_timeline_btn", use_container_width=True):
+                    if step_status["timeline"]:
+                        _clear_step_files(step_output_dir, ["timeline.csv"])
+                        _clear_step_files(step_output_dir / "videos", ["*.mp4"], exclude_subdir="backgrounds")
                     # ディスクから素材を読み込み
                     materials = load_existing_materials(str(step_output_dir))
                     st.session_state.audio_files = materials["audio_files"]
@@ -1869,6 +1880,18 @@ def main_page() -> None:
             st.info("📥 生成が完了すると、ここにダウンロードリンクが表示されます。")
     else:
         st.info("📥 生成が完了すると、ここにダウンロードリンクが表示されます。")
+
+
+def _clear_step_files(directory: Path, patterns: list[str], exclude_subdir: str | None = None) -> None:
+    """再生成時に既存ファイルを削除"""
+    if not directory.exists():
+        return
+    for pattern in patterns:
+        for f in directory.glob(pattern):
+            if f.is_file():
+                if exclude_subdir and exclude_subdir in str(f.relative_to(directory).parts):
+                    continue
+                f.unlink(missing_ok=True)
 
 
 def detect_step_status(output_dir: Path) -> dict[str, bool]:
