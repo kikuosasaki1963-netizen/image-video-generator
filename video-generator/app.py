@@ -2057,7 +2057,10 @@ def run_step_audio(script, output_dir: Path, history_entry: dict | None = None) 
 
         error_lower = error_str.lower()
         is_rate_limit = any(x in error_lower for x in ["クォータ", "quota", "429", "rate", "limit"]) or "レート制限" in error_str
-        if is_rate_limit:
+        is_partial = "一部失敗" in error_str
+        if is_partial:
+            st.warning(f"⚠️ {audio_err}")
+        elif is_rate_limit:
             st.error("❌ 音声生成がレート制限に達しました")
         else:
             st.error(f"❌ 音声生成エラー: {audio_err}")

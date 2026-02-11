@@ -256,7 +256,7 @@ class TTSClient:
             if not response.candidates or not response.candidates[0].content:
                 # 空レスポンスはレート制限の可能性が高い - リトライ可能なエラーとして扱う
                 logger.warning("Gemini TTS: レスポンスが空（レート制限の可能性）")
-                raise TTSError("Gemini TTS: レスポンスが空です（レート制限の可能性）", is_quota_error=False)
+                raise TTSError("Gemini TTS: レスポンスが空です（レート制限の可能性）", is_quota_error=True)
             if not response.candidates[0].content.parts:
                 raise TTSError("Gemini TTS: 音声データがありません")
 
@@ -370,6 +370,7 @@ class TTSClient:
         logger.info(f"台本音声合成開始: {total_lines}行, 推定時間: {estimated_time/60:.1f}分")
 
         generated_files = []
+        failed_lines: list[int] = []  # 失敗したセリフ番号
         skipped_count = 0
 
         for i, line in enumerate(script.lines):
@@ -390,11 +391,13 @@ class TTSClient:
 
             logger.info(f"セリフ {i + 1}/{total_lines}: {line.speaker}")
 
-            # リトライループ
+            # リトライループ（失敗しても次のセリフに進む）
+            line_success = False
             for retry in range(MAX_RETRIES):
                 try:
                     wav_path = self._synthesize_gemini(line.text, line.speaker, individual_path)
                     generated_files.append(wav_path)
+                    line_success = True
 
                     # 次のリクエストまで待機（最後以外）
                     if i < total_lines - 1:
@@ -402,41 +405,78 @@ class TTSClient:
                     break
 
                 except TTSError as e:
-                    if e.is_quota_error and not allow_fallback:
+                    if e.is_quota_error and allow_fallback:
+                        # フォールバック許可時
+                        try:
+                            logger.warning(f"Cloud TTSにフォールバック（セリフ {i + 1}）")
+                            wav_path = self._synthesize_cloud(line.text, line.speaker, individual_path)
+                            generated_files.append(wav_path)
+                            line_success = True
+                            break
+                        except Exception as fb_err:
+                            logger.error(f"フォールバックも失敗（セリフ {i + 1}）: {fb_err}")
+                    elif e.is_quota_error:
                         # クォータ超過：長めに待機してリトライ
                         wait_time = RETRY_BASE_WAIT * (retry + 1)  # 30秒、60秒、90秒...
                         if retry < MAX_RETRIES - 1:
                             logger.warning(f"レート制限検出 - {wait_time}秒待機後リトライ ({retry + 1}/{MAX_RETRIES})")
                             time.sleep(wait_time)
+                            continue
                         else:
-                            # 最終リトライも失敗
-                            error_msg = f"Gemini TTS レート制限（セリフ {i + 1}/{total_lines}）。生成済み: {len(generated_files)}件"
-                            logger.error(error_msg)
-                            raise TTSError(error_msg, original_error=e, is_quota_error=True)
-                    elif e.is_quota_error and allow_fallback:
-                        # フォールバック許可時
-                        logger.warning(f"Cloud TTSにフォールバック（セリフ {i + 1}）")
-                        wav_path = self._synthesize_cloud(line.text, line.speaker, individual_path)
-                        generated_files.append(wav_path)
-                        break
+                            logger.error(f"レート制限: セリフ {i + 1}/{total_lines} を{MAX_RETRIES}回リトライ後スキップ")
                     else:
                         # その他のエラー
                         wait_time = RETRY_BASE_WAIT * (retry + 1)
                         if retry < MAX_RETRIES - 1:
-                            logger.warning(f"TTS エラー - {wait_time}秒待機後リトライ: {e.message}")
+                            logger.warning(f"TTS エラー - {wait_time}秒待機後リトライ: {e}")
                             time.sleep(wait_time)
+                            continue
                         else:
-                            raise TTSError(f"音声生成失敗（セリフ {i + 1}）: {e.message}", original_error=e)
+                            logger.error(f"音声生成失敗（セリフ {i + 1}）: {e}")
 
                 except Exception as e:
                     wait_time = RETRY_BASE_WAIT * (retry + 1)
                     if retry < MAX_RETRIES - 1:
                         logger.warning(f"予期しないエラー - {wait_time}秒待機後リトライ: {e}")
                         time.sleep(wait_time)
+                        continue
                     else:
-                        raise TTSError(f"音声生成失敗（セリフ {i + 1}）: {e}")
+                        logger.error(f"音声生成失敗（セリフ {i + 1}）: {e}")
 
-        # 音声ファイルを結合
+            if not line_success:
+                failed_lines.append(i + 1)
+                logger.warning(f"セリフ {i + 1}/{total_lines} をスキップ（生成失敗）")
+                if progress_callback:
+                    progress_callback(i, total_lines, f"⚠️ セリフ{i + 1}スキップ")
+
+        # 失敗したセリフがある場合、リトライ（レート制限回復後）
+        if failed_lines and generated_files:
+            logger.info(f"失敗セリフ {len(failed_lines)}件をリトライ（60秒待機後）")
+            time.sleep(60)
+            for i, line in enumerate(script.lines):
+                if (i + 1) not in failed_lines:
+                    continue
+                individual_path = audio_dir / f"{line.number:03d}_{line.speaker}.wav"
+                if individual_path.exists() and individual_path.stat().st_size > 0:
+                    generated_files.append(individual_path)
+                    failed_lines.remove(i + 1)
+                    continue
+                try:
+                    wav_path = self._synthesize_gemini(line.text, line.speaker, individual_path)
+                    generated_files.append(wav_path)
+                    failed_lines.remove(i + 1)
+                    logger.info(f"リトライ成功: セリフ {i + 1}")
+                    if i < total_lines - 1:
+                        time.sleep(WAIT_BETWEEN_REQUESTS)
+                except Exception as e:
+                    logger.error(f"リトライも失敗（セリフ {i + 1}）: {e}")
+
+        if failed_lines:
+            logger.warning(f"生成失敗セリフ: {failed_lines}（{len(failed_lines)}件）")
+
+        # 音声ファイルを番号順にソートして結合
+        generated_files.sort(key=lambda p: Path(p).name)
+
         audio_segments = []
         for wav_file in generated_files:
             with wave.open(str(wav_file), "rb") as wf:
@@ -458,5 +498,7 @@ class TTSClient:
                 except OSError:
                     pass
 
-        logger.info(f"台本音声合成完了: {len(generated_files)}件")
+        logger.info(f"台本音声合成完了: {len(generated_files)}/{total_lines}件")
+        if failed_lines:
+            raise TTSError(f"音声生成一部失敗: セリフ{failed_lines}が生成できませんでした（{len(generated_files)}/{total_lines}件生成済み）")
         return full_audio_path
