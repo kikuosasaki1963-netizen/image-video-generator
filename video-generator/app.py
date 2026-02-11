@@ -1637,6 +1637,8 @@ def main_page() -> None:
                         if step_status["audio"]:
                             _clear_step_files(step_output_dir / "audio", ["*.wav"])
                             st.session_state.audio_files = {}
+                            st.session_state.reuse_mode["enabled"] = False
+                            st.session_state.reuse_mode["audio_files"] = {}
                         run_step_audio(script, step_output_dir, step_history)
                     except Exception as e:
                         st.error(f"音声生成エラー: {e}")
@@ -1652,6 +1654,7 @@ def main_page() -> None:
                     try:
                         if step_status["bgm"]:
                             _clear_step_files(step_output_dir / "bgm", ["*.mp3", "*.wav"])
+                            st.session_state.reuse_mode["enabled"] = False
                         run_step_bgm(script, prompts, step_output_dir, step_history)
                     except Exception as e:
                         st.error(f"BGM生成エラー: {e}")
@@ -1667,6 +1670,7 @@ def main_page() -> None:
                     try:
                         if step_status["bg_video"]:
                             _clear_step_files(step_output_dir / "videos" / "backgrounds", ["*.mp4"])
+                            st.session_state.reuse_mode["enabled"] = False
                         run_step_bg_video(script, prompts, step_output_dir, step_history)
                     except Exception as e:
                         st.error(f"背景動画取得エラー: {e}")
@@ -1686,6 +1690,7 @@ def main_page() -> None:
                     try:
                         if step_status["images"]:
                             _clear_step_files(step_output_dir / "images", ["*.png", "*.jpg"])
+                            st.session_state.reuse_mode["enabled"] = False
                         run_step_images(script, prompts, step_output_dir, step_history)
                     except Exception as e:
                         st.error(f"画像生成エラー: {e}")
