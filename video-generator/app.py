@@ -1636,13 +1636,20 @@ def main_page() -> None:
             pending_step = st.session_state.get("_pending_step")
             if pending_step:
                 st.session_state._pending_step = None
-                step_names = {"audio": "音声", "bgm": "BGM", "bg_video": "背景動画", "images": "画像", "timeline": "タイムライン"}
-                st.info(f"⏳ {step_names.get(pending_step, pending_step)} の生成を開始...")
-                _step_ok = False
+
+                # reuse_mode を無効化（再生成で旧ファイルコピー→即returnを防止）
+                st.session_state.reuse_mode["enabled"] = False
+
+                # 結合済みファイルを削除（個別ファイルは残してスキップ用に使う）
+                if pending_step == "audio":
+                    full_wav = step_output_dir / "audio" / "full_audio.wav"
+                    if full_wav.exists():
+                        full_wav.unlink(missing_ok=True)
+                    st.session_state.audio_files = {}
+
                 try:
                     if pending_step == "audio":
-                        result = run_step_audio(script, step_output_dir, step_history)
-                        st.write(f"結果: 成功={result.get('success')}, ファイル数={len(result.get('files', {}))}, エラー={result.get('error')}")
+                        run_step_audio(script, step_output_dir, step_history)
                     elif pending_step == "bgm":
                         run_step_bgm(script, prompts, step_output_dir, step_history)
                     elif pending_step == "bg_video":
@@ -1659,13 +1666,9 @@ def main_page() -> None:
                             step_history,
                         )
                         st.session_state.generation_complete = True
-                    _step_ok = True
                 except Exception as e:
                     st.error(f"生成エラー: {e}")
-                    import traceback
-                    st.code(traceback.format_exc())
-                if _step_ok:
-                    st.rerun()
+                st.rerun()
 
             # --- ステップダッシュボード（ボタンはフラグを立てるだけ） ---
 
