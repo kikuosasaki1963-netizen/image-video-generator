@@ -1669,10 +1669,6 @@ def main_page() -> None:
             with s1_col2:
                 s1_label = "🔄 再生成" if step_status["audio"] else "▶️ 生成開始"
                 if st.button(s1_label, key="step_audio_btn", use_container_width=True):
-                    if step_status["audio"]:
-                        _clear_step_files(step_output_dir / "audio", ["*.wav"])
-                        st.session_state.audio_files = {}
-                        st.session_state.reuse_mode["audio_files"] = {}
                     st.session_state._pending_step = "audio"
                     st.rerun()
 
@@ -1683,9 +1679,6 @@ def main_page() -> None:
             with s2_col2:
                 s2_label = "🔄 再生成" if step_status["bgm"] else "▶️ 生成開始"
                 if st.button(s2_label, key="step_bgm_btn", use_container_width=True):
-                    if step_status["bgm"]:
-                        _clear_step_files(step_output_dir / "bgm", ["*.mp3", "*.wav"])
-                        st.session_state.reuse_mode["bgm"] = None
                     st.session_state._pending_step = "bgm"
                     st.rerun()
 
@@ -1696,9 +1689,6 @@ def main_page() -> None:
             with s3_col2:
                 s3_label = "🔄 再生成" if step_status["bg_video"] else "▶️ 生成開始"
                 if st.button(s3_label, key="step_bg_video_btn", use_container_width=True):
-                    if step_status["bg_video"]:
-                        _clear_step_files(step_output_dir / "videos" / "backgrounds", ["*.mp4"])
-                        st.session_state.reuse_mode["videos"] = {}
                     st.session_state._pending_step = "bg_video"
                     st.rerun()
 
@@ -1713,9 +1703,6 @@ def main_page() -> None:
             with s4_col2:
                 s4_label = "🔄 再生成" if step_status["images"] else "▶️ 生成開始"
                 if st.button(s4_label, key="step_images_btn", use_container_width=True):
-                    if step_status["images"]:
-                        _clear_step_files(step_output_dir / "images", ["*.png", "*.jpg"])
-                        st.session_state.reuse_mode["images"] = {}
                     st.session_state._pending_step = "images"
                     st.rerun()
 
