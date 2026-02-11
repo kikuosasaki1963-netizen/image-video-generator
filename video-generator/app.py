@@ -1636,9 +1636,21 @@ def main_page() -> None:
             pending_step = st.session_state.get("_pending_step")
             if pending_step:
                 st.session_state._pending_step = None
+                is_regen = st.session_state.pop("_pending_regen", False)
 
-                # reuse_mode を無効化（再生成で旧ファイルコピー→即returnを防止）
-                st.session_state.reuse_mode["enabled"] = False
+                if is_regen:
+                    # 再生成: そのステップの再利用データだけ無効化
+                    if pending_step == "audio":
+                        st.session_state.reuse_mode["audio_files"] = {}
+                    elif pending_step == "bgm":
+                        st.session_state.reuse_mode["bgm"] = None
+                    elif pending_step == "bg_video":
+                        st.session_state.reuse_mode["videos"] = {}
+                    elif pending_step == "images":
+                        st.session_state.reuse_mode["images"] = {}
+                    elif pending_step == "timeline":
+                        _clear_step_files(step_output_dir, ["timeline.csv"])
+                        _clear_step_files(step_output_dir / "videos", ["*.mp4"], exclude_subdir="backgrounds")
 
                 # 結合済みファイルを削除（個別ファイルは残してスキップ用に使う）
                 if pending_step == "audio":
@@ -1681,6 +1693,7 @@ def main_page() -> None:
                 s1_label = "🔄 再生成" if step_status["audio"] else "▶️ 生成開始"
                 if st.button(s1_label, key="step_audio_btn", use_container_width=True):
                     st.session_state._pending_step = "audio"
+                    st.session_state._pending_regen = step_status["audio"]
                     st.rerun()
 
             # STEP 2: BGM
@@ -1691,6 +1704,7 @@ def main_page() -> None:
                 s2_label = "🔄 再生成" if step_status["bgm"] else "▶️ 生成開始"
                 if st.button(s2_label, key="step_bgm_btn", use_container_width=True):
                     st.session_state._pending_step = "bgm"
+                    st.session_state._pending_regen = step_status["bgm"]
                     st.rerun()
 
             # STEP 3: 背景動画
@@ -1701,6 +1715,7 @@ def main_page() -> None:
                 s3_label = "🔄 再生成" if step_status["bg_video"] else "▶️ 生成開始"
                 if st.button(s3_label, key="step_bg_video_btn", use_container_width=True):
                     st.session_state._pending_step = "bg_video"
+                    st.session_state._pending_regen = step_status["bg_video"]
                     st.rerun()
 
             # STEP 4: 画像
@@ -1715,6 +1730,7 @@ def main_page() -> None:
                 s4_label = "🔄 再生成" if step_status["images"] else "▶️ 生成開始"
                 if st.button(s4_label, key="step_images_btn", use_container_width=True):
                     st.session_state._pending_step = "images"
+                    st.session_state._pending_regen = step_status["images"]
                     st.rerun()
 
             # STEP 5: タイムライン/動画合成
@@ -1724,10 +1740,8 @@ def main_page() -> None:
             with s5_col2:
                 s5_label = "🔄 再生成" if step_status["timeline"] else "▶️ 生成開始"
                 if st.button(s5_label, key="step_timeline_btn", use_container_width=True):
-                    if step_status["timeline"]:
-                        _clear_step_files(step_output_dir, ["timeline.csv"])
-                        _clear_step_files(step_output_dir / "videos", ["*.mp4"], exclude_subdir="backgrounds")
                     st.session_state._pending_step = "timeline"
+                    st.session_state._pending_regen = step_status["timeline"]
                     st.rerun()
 
             st.info(f"📂 出力先: `{step_output_dir}`")
