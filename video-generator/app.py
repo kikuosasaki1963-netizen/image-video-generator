@@ -799,6 +799,8 @@ def main_page() -> None:
         st.session_state.pronunciation_suggestions = []
     if "step_mode" not in st.session_state:
         st.session_state.step_mode = True
+    if "_last_script_name" not in st.session_state:
+        st.session_state._last_script_name = ""
 
     # 履歴セクション（常に表示）
     with st.expander("📜 生成履歴", expanded=True):
@@ -1126,45 +1128,52 @@ def main_page() -> None:
         )
         if script_file:
             st.success(f"✅ {script_file.name} をアップロードしました")
-            # 生のコンテンツを保存（項数検出用）
-            if script_file.name.lower().endswith(".docx"):
-                from docx import Document
-                doc = Document(BytesIO(script_file.getvalue()))
-                st.session_state.script_raw_content = "\n".join(para.text for para in doc.paragraphs)
-                script_file.seek(0)  # ファイルポインタをリセット
-            else:
-                st.session_state.script_raw_content = script_file.getvalue().decode("utf-8")
-                script_file.seek(0)  # ファイルポインタをリセット
-            # 台本をパース
-            parser = ScriptParser()
-            st.session_state.script = parser.parse_uploaded_file(script_file)
 
-            # 読み確認を自動実行（high/medium を自動適用）
-            try:
-                from src.audio.pronunciation import apply_suggestions, check_pronunciation
+            # 新しいファイルの場合のみパース（毎回のリランでは実行しない）
+            last_script_name = st.session_state.get("_last_script_name", "")
+            if script_file.name != last_script_name:
+                st.session_state._last_script_name = script_file.name
+                # 生のコンテンツを保存（項数検出用）
+                if script_file.name.lower().endswith(".docx"):
+                    from docx import Document
+                    doc = Document(BytesIO(script_file.getvalue()))
+                    st.session_state.script_raw_content = "\n".join(para.text for para in doc.paragraphs)
+                    script_file.seek(0)  # ファイルポインタをリセット
+                else:
+                    st.session_state.script_raw_content = script_file.getvalue().decode("utf-8")
+                    script_file.seek(0)  # ファイルポインタをリセット
+                # 台本をパース
+                parser = ScriptParser()
+                st.session_state.script = parser.parse_uploaded_file(script_file)
 
-                full_text = "\n".join(
-                    line.text for line in st.session_state.script.lines
-                )
-                suggestions = check_pronunciation(full_text)
-                if suggestions:
-                    auto_indices = [
-                        i for i, s in enumerate(suggestions)
-                        if s.confidence in ("high", "medium")
-                    ]
-                    if auto_indices:
-                        apply_suggestions(
-                            st.session_state.script.lines,
-                            suggestions,
-                            auto_indices,
-                        )
-                    # low confidence は手動確認用に残す
-                    remaining = [
-                        s for s in suggestions if s.confidence == "low"
-                    ]
-                    st.session_state.pronunciation_suggestions = remaining
-            except Exception as pron_err:
-                st.warning(f"⚠️ 読み自動チェック: {pron_err}")
+                # 読み確認を自動実行（high/medium を自動適用）
+                try:
+                    from src.audio.pronunciation import apply_suggestions, check_pronunciation
+
+                    full_text = "\n".join(
+                        line.text for line in st.session_state.script.lines
+                    )
+                    with st.spinner("読み確認を実行中..."):
+                        suggestions = check_pronunciation(full_text)
+                    if suggestions:
+                        auto_indices = [
+                            i for i, s in enumerate(suggestions)
+                            if s.confidence in ("high", "medium")
+                        ]
+                        if auto_indices:
+                            apply_suggestions(
+                                st.session_state.script.lines,
+                                suggestions,
+                                auto_indices,
+                            )
+                            st.info(f"読み仮名を{len(auto_indices)}件自動適用しました")
+                        # low confidence は手動確認用に残す
+                        remaining = [
+                            s for s in suggestions if s.confidence == "low"
+                        ]
+                        st.session_state.pronunciation_suggestions = remaining
+                except Exception as pron_err:
+                    st.warning(f"⚠️ 読み自動チェック: {pron_err}")
 
     with col2:
         st.subheader("🖼️ 画像プロンプトファイル")
@@ -1624,9 +1633,13 @@ def main_page() -> None:
             with s1_col2:
                 s1_label = "🔄 再生成" if step_status["audio"] else "▶️ 生成開始"
                 if st.button(s1_label, key="step_audio_btn", use_container_width=True):
-                    if step_status["audio"]:
-                        _clear_step_files(step_output_dir / "audio", ["*.wav"])
-                    run_step_audio(script, step_output_dir, step_history)
+                    try:
+                        if step_status["audio"]:
+                            _clear_step_files(step_output_dir / "audio", ["*.wav"])
+                            st.session_state.audio_files = {}
+                        run_step_audio(script, step_output_dir, step_history)
+                    except Exception as e:
+                        st.error(f"音声生成エラー: {e}")
                     st.rerun()
 
             # STEP 2: BGM
@@ -1636,9 +1649,12 @@ def main_page() -> None:
             with s2_col2:
                 s2_label = "🔄 再生成" if step_status["bgm"] else "▶️ 生成開始"
                 if st.button(s2_label, key="step_bgm_btn", use_container_width=True):
-                    if step_status["bgm"]:
-                        _clear_step_files(step_output_dir / "bgm", ["*.mp3", "*.wav"])
-                    run_step_bgm(script, prompts, step_output_dir, step_history)
+                    try:
+                        if step_status["bgm"]:
+                            _clear_step_files(step_output_dir / "bgm", ["*.mp3", "*.wav"])
+                        run_step_bgm(script, prompts, step_output_dir, step_history)
+                    except Exception as e:
+                        st.error(f"BGM生成エラー: {e}")
                     st.rerun()
 
             # STEP 3: 背景動画
@@ -1648,9 +1664,12 @@ def main_page() -> None:
             with s3_col2:
                 s3_label = "🔄 再生成" if step_status["bg_video"] else "▶️ 生成開始"
                 if st.button(s3_label, key="step_bg_video_btn", use_container_width=True):
-                    if step_status["bg_video"]:
-                        _clear_step_files(step_output_dir / "videos" / "backgrounds", ["*.mp4"])
-                    run_step_bg_video(script, prompts, step_output_dir, step_history)
+                    try:
+                        if step_status["bg_video"]:
+                            _clear_step_files(step_output_dir / "videos" / "backgrounds", ["*.mp4"])
+                        run_step_bg_video(script, prompts, step_output_dir, step_history)
+                    except Exception as e:
+                        st.error(f"背景動画取得エラー: {e}")
                     st.rerun()
 
             # STEP 4: 画像
@@ -1664,9 +1683,12 @@ def main_page() -> None:
             with s4_col2:
                 s4_label = "🔄 再生成" if step_status["images"] else "▶️ 生成開始"
                 if st.button(s4_label, key="step_images_btn", use_container_width=True):
-                    if step_status["images"]:
-                        _clear_step_files(step_output_dir / "images", ["*.png", "*.jpg"])
-                    run_step_images(script, prompts, step_output_dir, step_history)
+                    try:
+                        if step_status["images"]:
+                            _clear_step_files(step_output_dir / "images", ["*.png", "*.jpg"])
+                        run_step_images(script, prompts, step_output_dir, step_history)
+                    except Exception as e:
+                        st.error(f"画像生成エラー: {e}")
                     st.rerun()
 
             # STEP 5: タイムライン/動画合成
@@ -1676,21 +1698,24 @@ def main_page() -> None:
             with s5_col2:
                 s5_label = "🔄 再生成" if step_status["timeline"] else "▶️ 生成開始"
                 if st.button(s5_label, key="step_timeline_btn", use_container_width=True):
-                    if step_status["timeline"]:
-                        _clear_step_files(step_output_dir, ["timeline.csv"])
-                        _clear_step_files(step_output_dir / "videos", ["*.mp4"], exclude_subdir="backgrounds")
-                    # ディスクから素材を読み込み
-                    materials = load_existing_materials(str(step_output_dir))
-                    st.session_state.audio_files = materials["audio_files"]
-                    gen_images = materials["images"]
-                    bg_videos = materials["videos"]
-                    bgm = Path(materials["bgm"]) if materials["bgm"] else None
+                    try:
+                        if step_status["timeline"]:
+                            _clear_step_files(step_output_dir, ["timeline.csv"])
+                            _clear_step_files(step_output_dir / "videos", ["*.mp4"], exclude_subdir="backgrounds")
+                        # ディスクから素材を読み込み
+                        materials = load_existing_materials(str(step_output_dir))
+                        st.session_state.audio_files = materials["audio_files"]
+                        gen_images = materials["images"]
+                        bg_videos = materials["videos"]
+                        bgm = Path(materials["bgm"]) if materials["bgm"] else None
 
-                    run_step_timeline(
-                        script, prompts, mode, output_formats, step_output_dir,
-                        gen_images, bg_videos, bgm, step_history,
-                    )
-                    st.session_state.generation_complete = True
+                        run_step_timeline(
+                            script, prompts, mode, output_formats, step_output_dir,
+                            gen_images, bg_videos, bgm, step_history,
+                        )
+                        st.session_state.generation_complete = True
+                    except Exception as e:
+                        st.error(f"タイムライン/動画合成エラー: {e}")
                     st.rerun()
 
             st.info(f"📂 出力先: `{step_output_dir}`")
