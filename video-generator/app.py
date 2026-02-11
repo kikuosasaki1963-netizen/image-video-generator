@@ -1496,6 +1496,10 @@ def main_page() -> None:
         )
         st.session_state.output_mode = mode
 
+        # 自動モードでは一括生成を強制
+        if mode == "自動モード（完成動画出力）":
+            st.session_state.audio_mode = "batch"
+
         output_formats = []
         if mode == "自動モード（完成動画出力）":
             st.subheader("出力形式を選択")
