@@ -64,10 +64,34 @@ class ScriptParser:
         re.compile(r"^画像生成プロンプト|^BGM|^SE[：:]"),  # メタ指示
     ]
 
-    # 話者パターン: speaker1:, Speaker 1:, speaker 2: など（スペースあり/なし対応）
+    # 話者パターン: speaker1:, Speaker 1:, ミオン：, アリイエ： など
     SPEAKER_PATTERN = re.compile(r"^(speaker\s*\d+):\s*(.+)$", re.IGNORECASE)
     # 話者のみのパターン（次の行にテキストがある場合）
     SPEAKER_ONLY_PATTERN = re.compile(r"^(speaker\s*\d+):\s*$", re.IGNORECASE)
+
+    # キャラ名形式: 「名前：セリフ」または「名前: セリフ」（全角/半角コロン対応）
+    # 名前は1〜10文字のひらがな・カタカナ・漢字・英字
+    CHAR_NAME_PATTERN = re.compile(
+        r"^([぀-ヿ㐀-䶵一-鿋豈-頻々〇〻\u3400-\u9FFFぁ-んァ-ヶa-zA-Zａ-ｚＡ-Ｚ]{1,10})[：:]\s*(.+)$"
+    )
+    CHAR_NAME_ONLY_PATTERN = re.compile(
+        r"^([぀-ヿ㐀-䶵一-鿋豈-頻々〇〻\u3400-\u9FFFぁ-んァ-ヶa-zA-Zａ-ｚＡ-Ｚ]{1,10})[：:]\s*$"
+    )
+
+    # セクションラベル（これ以前をスキップし、以降をセリフとして解析）
+    SCRIPT_START_PATTERNS = [
+        re.compile(r"^本編シナリオ"),
+        re.compile(r"^台本本文"),
+        re.compile(r"^シナリオ本文"),
+        re.compile(r"^本文"),
+    ]
+
+    # セクション区切り（これ以降のセリフ解析を停止）
+    SCRIPT_END_PATTERNS = [
+        re.compile(r"^画像生成プロンプト"),
+        re.compile(r"^サムネイル"),
+        re.compile(r"^エンディング"),
+    ]
 
     def parse_file(self, file_path: str | Path) -> Script:
         """ファイルを解析して台本データを返す
@@ -137,12 +161,69 @@ class ScriptParser:
                 return True
         return False
 
+    def _find_script_start(self, lines: list[str]) -> int:
+        """セリフ開始位置を検出（「本編シナリオ」等のラベル以降）"""
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            for pattern in self.SCRIPT_START_PATTERNS:
+                if pattern.search(stripped):
+                    return i + 1  # ラベルの次の行から
+        return 0  # 見つからない場合は先頭から
+
+    def _is_script_end(self, text: str) -> bool:
+        """セリフ終了セクションかどうか判定"""
+        for pattern in self.SCRIPT_END_PATTERNS:
+            if pattern.search(text):
+                return True
+        return False
+
+    def _match_speaker(self, raw_line: str) -> tuple[str, str] | None:
+        """話者+テキスト行にマッチ（speaker形式 + キャラ名形式）"""
+        # speaker1: テキスト 形式
+        match = self.SPEAKER_PATTERN.match(raw_line)
+        if match:
+            speaker = match.group(1).lower().replace(" ", "")
+            return speaker, match.group(2)
+
+        # キャラ名：テキスト 形式
+        match = self.CHAR_NAME_PATTERN.match(raw_line)
+        if match:
+            return match.group(1), match.group(2)
+
+        return None
+
+    def _match_speaker_only(self, raw_line: str) -> str | None:
+        """話者のみの行にマッチ"""
+        match = self.SPEAKER_ONLY_PATTERN.match(raw_line)
+        if match:
+            return match.group(1).lower().replace(" ", "")
+
+        match = self.CHAR_NAME_ONLY_PATTERN.match(raw_line)
+        if match:
+            return match.group(1)
+
+        return None
+
+    def _normalize_speaker(self, name: str, speaker_map: dict[str, str]) -> str:
+        """キャラ名をspeaker1/speaker2に正規化"""
+        if name.startswith("speaker"):
+            return name
+        if name not in speaker_map:
+            # 新しいキャラ名 → 登場順にspeaker1, speaker2, ...
+            idx = len(speaker_map) + 1
+            speaker_map[name] = f"speaker{idx}"
+        return speaker_map[name]
+
     def _parse_content(self, content: str, filename: str) -> Script:
-        """コンテンツを解析（複数行形式にも対応）"""
+        """コンテンツを解析（speaker形式 + キャラ名形式に対応）"""
         script = Script(filename=filename)
         line_number = 0
         lines = content.split("\n")
-        i = 0
+        speaker_map: dict[str, str] = {}  # キャラ名 → speaker1/speaker2
+
+        # セリフ開始位置を検出
+        start_idx = self._find_script_start(lines)
+        i = start_idx
 
         while i < len(lines):
             raw_line = lines[i].strip()
@@ -151,27 +232,31 @@ class ScriptParser:
             if not raw_line:
                 continue
 
+            # セリフ終了セクション
+            if self._is_script_end(raw_line):
+                break
+
             # 非セリフ行をスキップ
             if self._is_non_dialogue(raw_line):
                 continue
 
-            # 同一行にテキストがある場合（Speaker 1: テキスト）
-            match = self.SPEAKER_PATTERN.match(raw_line)
-            if match:
+            # 話者+テキスト行
+            result = self._match_speaker(raw_line)
+            if result:
+                speaker_name, text = result
+                speaker = self._normalize_speaker(speaker_name, speaker_map)
                 line_number += 1
-                speaker = match.group(1).lower().replace(" ", "")
-                text = match.group(2)
             else:
                 # 話者のみの行（次の行にテキスト）
-                speaker_only = self.SPEAKER_ONLY_PATTERN.match(raw_line)
-                if speaker_only:
-                    speaker = speaker_only.group(1).lower().replace(" ", "")
-                    # 次の行からテキストを取得
+                speaker_name = self._match_speaker_only(raw_line)
+                if speaker_name:
+                    speaker = self._normalize_speaker(speaker_name, speaker_map)
                     text_lines = []
                     while i < len(lines):
                         next_line = lines[i].strip()
-                        # 次の話者が来たら終了
-                        if self.SPEAKER_PATTERN.match(next_line) or self.SPEAKER_ONLY_PATTERN.match(next_line):
+                        if self._match_speaker(next_line) or self._match_speaker_only(next_line):
+                            break
+                        if self._is_script_end(next_line):
                             break
                         if next_line:
                             text_lines.append(next_line)
@@ -213,7 +298,7 @@ class ScriptParser:
             )
             script.lines.append(line)
 
-        # Speaker形式が見つからなかった場合、フォールバックパーサーを使用
+        # Speaker/キャラ名形式が見つからなかった場合、フォールバック
         if not script.lines:
             script = self._parse_content_fallback(content, filename)
 
