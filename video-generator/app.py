@@ -1636,9 +1636,13 @@ def main_page() -> None:
             pending_step = st.session_state.get("_pending_step")
             if pending_step:
                 st.session_state._pending_step = None
+                step_names = {"audio": "音声", "bgm": "BGM", "bg_video": "背景動画", "images": "画像", "timeline": "タイムライン"}
+                st.info(f"⏳ {step_names.get(pending_step, pending_step)} の生成を開始...")
+                _step_ok = False
                 try:
                     if pending_step == "audio":
-                        run_step_audio(script, step_output_dir, step_history)
+                        result = run_step_audio(script, step_output_dir, step_history)
+                        st.write(f"結果: 成功={result.get('success')}, ファイル数={len(result.get('files', {}))}, エラー={result.get('error')}")
                     elif pending_step == "bgm":
                         run_step_bgm(script, prompts, step_output_dir, step_history)
                     elif pending_step == "bg_video":
@@ -1655,9 +1659,13 @@ def main_page() -> None:
                             step_history,
                         )
                         st.session_state.generation_complete = True
+                    _step_ok = True
                 except Exception as e:
                     st.error(f"生成エラー: {e}")
-                st.rerun()
+                    import traceback
+                    st.code(traceback.format_exc())
+                if _step_ok:
+                    st.rerun()
 
             # --- ステップダッシュボード（ボタンはフラグを立てるだけ） ---
 
