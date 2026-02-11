@@ -48,6 +48,22 @@ class ScriptParser:
     # タイムスタンプ・章見出しパターン: 【2:30】 失敗のメカニズム解説① など
     TIMESTAMP_SECTION_PATTERN = re.compile(r"\s*【[^】]*】.*$")
 
+    # 非セリフ行パターン（タイトル・見出し・装飾行）
+    NON_DIALOGUE_PATTERNS = [
+        re.compile(r"^【.*】"),                    # 【チャプター名】
+        re.compile(r"^〈.*〉"),                    # 〈補足〉
+        re.compile(r"^■|^●|^◆|^▶|^◎|^★|^☆"),     # 記号見出し
+        re.compile(r"^━+|^─+|^＝+|^=+|^-{3,}"),   # 装飾線
+        re.compile(r"^#{1,6}\s"),                  # Markdownの見出し
+        re.compile(r"^タイトル[：:]"),              # タイトル行
+        re.compile(r"^テーマ[：:]"),               # テーマ行
+        re.compile(r"^台本[：:]"),                  # 台本ラベル
+        re.compile(r"^\d+[：:]\d+[〜~～]\d+[：:]\d+"),  # タイムレンジ 0:00〜1:30
+        re.compile(r"^※"),                         # 注釈行
+        re.compile(r"^[\[（\(].*[）\)\]]$"),       # 全体が括弧の行（ト書き）
+        re.compile(r"^画像生成プロンプト|^BGM|^SE[：:]"),  # メタ指示
+    ]
+
     # 話者パターン: speaker1:, Speaker 1:, speaker 2: など（スペースあり/なし対応）
     SPEAKER_PATTERN = re.compile(r"^(speaker\s*\d+):\s*(.+)$", re.IGNORECASE)
     # 話者のみのパターン（次の行にテキストがある場合）
@@ -114,6 +130,13 @@ class ScriptParser:
         with open(file_path, encoding="utf-8") as f:
             return f.read()
 
+    def _is_non_dialogue(self, text: str) -> bool:
+        """非セリフ行（タイトル・見出し・装飾）かどうか判定"""
+        for pattern in self.NON_DIALOGUE_PATTERNS:
+            if pattern.search(text):
+                return True
+        return False
+
     def _parse_content(self, content: str, filename: str) -> Script:
         """コンテンツを解析（複数行形式にも対応）"""
         script = Script(filename=filename)
@@ -126,6 +149,10 @@ class ScriptParser:
             i += 1
 
             if not raw_line:
+                continue
+
+            # 非セリフ行をスキップ
+            if self._is_non_dialogue(raw_line):
                 continue
 
             # 同一行にテキストがある場合（Speaker 1: テキスト）
@@ -208,16 +235,24 @@ class ScriptParser:
             if not raw_line:
                 continue
 
+            # 非セリフ行をスキップ
+            if self._is_non_dialogue(raw_line):
+                continue
+
             # 番号付き行をチェック
             match = numbered_pattern.match(raw_line)
             if match:
-                line_number += 1
                 text = match.group(2).strip()
+                # 番号付き行でも非セリフならスキップ
+                if self._is_non_dialogue(text):
+                    continue
+                line_number += 1
                 # 話者を交互に切り替え
                 current_speaker = "speaker1" if line_number % 2 == 1 else "speaker2"
             else:
-                # 通常のテキスト行（5文字以上の行のみ対象）
-                if len(raw_line) >= 5:
+                # 通常のテキスト行（10文字以上かつ句読点を含む行のみ＝セリフらしい行）
+                has_punctuation = any(c in raw_line for c in "。、！？!?」』)")
+                if len(raw_line) >= 10 and has_punctuation:
                     line_number += 1
                     text = raw_line
                     current_speaker = "speaker1" if line_number % 2 == 1 else "speaker2"
