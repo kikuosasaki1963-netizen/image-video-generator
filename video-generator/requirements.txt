@@ -1,5 +1,5 @@
 # Streamlit Framework
-streamlit>=1.30.0
+streamlit>=1.37.0
 
 # Google AI Services (Gemini API + Cloud TTS)
 google-genai>=1.0.0
