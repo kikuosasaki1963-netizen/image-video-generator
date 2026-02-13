@@ -1838,7 +1838,10 @@ def _dir_size_mb(files: list[Path]) -> float:
     return sum(f.stat().st_size for f in files if f.is_file()) / (1024 * 1024)
 
 
-@st.fragment
+_fragment = getattr(st, "fragment", None)
+
+
+@(_fragment if _fragment else lambda fn: fn)
 def render_download_section(output_dir: Path) -> None:
     """STEP 5: ダウンロードセクション（fragmentで分離）"""
     downloads_dir = output_dir / "_downloads"
