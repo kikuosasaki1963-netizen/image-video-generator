@@ -1276,7 +1276,7 @@ def main_page() -> None:
                 st.rerun()
 
     # 画像プロンプト自動生成オプション
-    if script and not st.session_state.prompts:
+    if script and (not st.session_state.prompts or st.session_state.prompts.total_images == 0):
         st.subheader("🖼️ 画像プロンプト自動生成")
         st.markdown("台本の内容からAIが自動的に画像プロンプトを生成します。")
 
@@ -1326,7 +1326,7 @@ def main_page() -> None:
             st.markdown(f"**[{p.number}]** `{p.start_time}` - `{p.end_time}` | {p.prompt}")
     else:
         st.warning("⚠️ 画像プロンプトがまだ生成されていません。上の「🎨 台本から画像プロンプトを自動生成」ボタンをクリックしてください。")
-        st.info("💡 または、生成開始時に自動的に生成されます。")
+        st.info("💡 または、ステップモードで「STEP 4: 画像生成」を実行すると自動的に生成されます。")
 
     # STEP 3: 音声プレビュー
     if script:
@@ -1485,7 +1485,7 @@ def main_page() -> None:
                     st.error(f"❌ 音声生成エラー: {e}")
 
     # STEP 4: モード選択＆生成実行
-    if script and prompts:
+    if script:
         st.header("STEP 4: モード選択＆生成実行")
 
         mode_options = ["Filmoraモード（素材出力）", "自動モード（完成動画出力）"]
@@ -1805,132 +1805,181 @@ def main_page() -> None:
             else:
                 st.warning(f"⚠️ 生成が中断されましたが、一部の素材は保存されています。出力先: {output_dir}")
 
-            # ファイル種別ごとのカウント
-            audio_files = list((output_dir / "audio").rglob("*")) if (output_dir / "audio").exists() else []
-            image_files = list((output_dir / "images").rglob("*")) if (output_dir / "images").exists() else []
-            bgm_files = list((output_dir / "bgm").rglob("*")) if (output_dir / "bgm").exists() else []
-            # 完成動画（videos直下のmp4）と素材動画（backgrounds内）を分離
-            videos_dir = output_dir / "videos"
-            final_videos = [f for f in videos_dir.glob("*.mp4") if f.is_file()] if videos_dir.exists() else []
-            bg_videos = list((videos_dir / "backgrounds").rglob("*.mp4")) if (videos_dir / "backgrounds").exists() else []
-
-            # 完成動画がある場合は目立たせて表示
-            if final_videos:
-                st.markdown("### 🎬 完成動画")
-                for fv in final_videos:
-                    fv_size_mb = fv.stat().st_size / (1024 * 1024)
-                    fcol1, fcol2 = st.columns([3, 1])
-                    with fcol1:
-                        st.markdown(f"**{fv.name}** ({fv_size_mb:.0f}MB)")
-                    with fcol2:
-                        with open(fv, "rb") as vf:
-                            st.download_button(
-                                label=f"📥 ダウンロード",
-                                data=vf,
-                                file_name=fv.name,
-                                mime="video/mp4",
-                                key=f"dl_final_{fv.name}",
-                            )
-                st.divider()
-
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("🎤 音声", f"{len([f for f in audio_files if f.is_file()])}件")
-            with col2:
-                st.metric("🖼️ 画像", f"{len([f for f in image_files if f.is_file()])}枚")
-            with col3:
-                st.metric("🎵 BGM", f"{len([f for f in bgm_files if f.is_file()])}件")
-            with col4:
-                st.metric("🎬 素材動画", f"{len(bg_videos)}本")
-
-            # カテゴリ別ZIPダウンロード
-            def _create_zip(files: list, base_dir: Path) -> BytesIO:
-                """指定ファイルリストからZIPバッファを作成"""
-                buf = BytesIO()
-                with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                    for f in files:
-                        if f.is_file():
-                            zf.write(f, f.relative_to(base_dir))
-                buf.seek(0)
-                return buf
-
-            def _dir_size_mb(files: list) -> float:
-                """ファイルリストの合計サイズ(MB)"""
-                return sum(f.stat().st_size for f in files if f.is_file()) / (1024 * 1024)
-
-            categories = [
-                ("🎤 音声", "audio", [f for f in audio_files if f.is_file()]),
-                ("🖼️ 画像", "images", [f for f in image_files if f.is_file()]),
-                ("🎵 BGM", "bgm", [f for f in bgm_files if f.is_file()]),
-                ("🎬 素材動画", "videos", bg_videos),
-            ]
-
-            MAX_ZIP_MB = 300  # ZIPダウンロード上限(MB)
-
-            st.markdown("**カテゴリ別ダウンロード**")
-            dl_cols = st.columns(len(categories))
-            for col, (label, folder_name, files) in zip(dl_cols, categories):
-                with col:
-                    if files:
-                        size_mb = _dir_size_mb(files)
-                        if size_mb <= MAX_ZIP_MB:
-                            zip_buf = _create_zip(files, output_dir)
-                            st.download_button(
-                                label=f"{label} ({size_mb:.0f}MB)",
-                                data=zip_buf,
-                                file_name=f"{folder_name}_{output_dir.name}.zip",
-                                mime="application/zip",
-                                key=f"dl_{folder_name}",
-                            )
-                        else:
-                            # 大容量: 選択→準備→ダウンロードの3段階（メモリ節約）
-                            file_options = {f"{f.name} ({f.stat().st_size / (1024*1024):.0f}MB)": str(f) for f in files}
-                            selected = st.selectbox(
-                                f"{label} ({size_mb:.0f}MB) - ファイルを選択",
-                                options=list(file_options.keys()),
-                                key=f"sel_{folder_name}",
-                            )
-                            ready_key = f"ready_{folder_name}"
-                            if st.button("📦 ダウンロード準備", key=f"prep_{folder_name}"):
-                                st.session_state[ready_key] = file_options.get(selected, "")
-                            if st.session_state.get(ready_key) and selected and file_options.get(selected) == st.session_state.get(ready_key):
-                                ready_file = Path(st.session_state[ready_key])
-                                if ready_file.exists():
-                                    st.download_button(
-                                        label=f"📥 ダウンロード",
-                                        data=ready_file.read_bytes(),
-                                        file_name=ready_file.name,
-                                        mime="application/octet-stream",
-                                        key=f"dl_{folder_name}_sel",
-                                    )
-                    else:
-                        st.button(f"{label} なし", disabled=True, key=f"dl_{folder_name}")
-
-            # 一括ダウンロード（500MB以下の場合のみ）
-            all_files = [f for f in output_dir.rglob("*") if f.is_file()]
-            total_mb = _dir_size_mb(all_files)
-            if total_mb <= 500:
-                zip_buffer = _create_zip(all_files, output_dir)
-                download_label = "📥 生成物を一括ダウンロード (ZIP)" if st.session_state.generation_complete else "📥 生成済み素材を一括ダウンロード (ZIP)"
-                st.download_button(
-                    label=f"{download_label} ({total_mb:.0f}MB)",
-                    data=zip_buffer,
-                    file_name=f"video_output_{output_dir.name}.zip",
-                    mime="application/zip",
-                    key="dl_all",
-                )
-            else:
-                st.info(f"📦 合計 {total_mb:.0f}MB のため、一括ダウンロードは無効です。カテゴリ別にダウンロードしてください。")
-
-            # 個別ファイル一覧
-            with st.expander("📁 生成ファイル一覧"):
-                for file_path in sorted(output_dir.rglob("*")):
-                    if file_path.is_file():
-                        st.text(f"  {file_path.relative_to(output_dir)}")
+            render_download_section(output_dir)
         else:
             st.info("📥 生成が完了すると、ここにダウンロードリンクが表示されます。")
     else:
         st.info("📥 生成が完了すると、ここにダウンロードリンクが表示されます。")
+
+
+def _create_zip_to_disk(files: list[Path], base_dir: Path, zip_path: Path) -> Path:
+    """指定ファイルリストからZIPをディスクに作成（キャッシュ対応）。
+
+    zip_path が既に存在し、かつ全ソースファイルより新しい場合は再作成しない。
+    """
+    if zip_path.exists():
+        zip_mtime = zip_path.stat().st_mtime
+        needs_rebuild = any(
+            f.is_file() and f.stat().st_mtime > zip_mtime for f in files
+        )
+        if not needs_rebuild:
+            return zip_path
+
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in files:
+            if f.is_file():
+                zf.write(f, f.relative_to(base_dir))
+    return zip_path
+
+
+def _dir_size_mb(files: list[Path]) -> float:
+    """ファイルリストの合計サイズ(MB)"""
+    return sum(f.stat().st_size for f in files if f.is_file()) / (1024 * 1024)
+
+
+@st.fragment
+def render_download_section(output_dir: Path) -> None:
+    """STEP 5: ダウンロードセクション（fragmentで分離）"""
+    downloads_dir = output_dir / "_downloads"
+
+    # ファイル種別ごとのカウント
+    audio_files = list((output_dir / "audio").rglob("*")) if (output_dir / "audio").exists() else []
+    image_files = list((output_dir / "images").rglob("*")) if (output_dir / "images").exists() else []
+    bgm_files = list((output_dir / "bgm").rglob("*")) if (output_dir / "bgm").exists() else []
+    # 完成動画（videos直下のmp4）と素材動画（backgrounds内）を分離
+    videos_dir = output_dir / "videos"
+    final_videos = [f for f in videos_dir.glob("*.mp4") if f.is_file()] if videos_dir.exists() else []
+    bg_videos = list((videos_dir / "backgrounds").rglob("*.mp4")) if (videos_dir / "backgrounds").exists() else []
+
+    # 完成動画がある場合は目立たせて表示
+    if final_videos:
+        st.markdown("### 🎬 完成動画")
+        for fv in final_videos:
+            fv_size_mb = fv.stat().st_size / (1024 * 1024)
+            fcol1, fcol2 = st.columns([3, 1])
+            with fcol1:
+                st.markdown(f"**{fv.name}** ({fv_size_mb:.0f}MB)")
+            with fcol2:
+                with open(fv, "rb") as vf:
+                    st.download_button(
+                        label="📥 ダウンロード",
+                        data=vf,
+                        file_name=fv.name,
+                        mime="video/mp4",
+                        key=f"dl_final_{fv.name}",
+                    )
+        st.divider()
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("🎤 音声", f"{len([f for f in audio_files if f.is_file()])}件")
+    with col2:
+        st.metric("🖼️ 画像", f"{len([f for f in image_files if f.is_file()])}枚")
+    with col3:
+        st.metric("🎵 BGM", f"{len([f for f in bgm_files if f.is_file()])}件")
+    with col4:
+        st.metric("🎬 素材動画", f"{len(bg_videos)}本")
+
+    # カテゴリ別ZIPダウンロード
+    categories = [
+        ("🎤 音声", "audio", [f for f in audio_files if f.is_file()]),
+        ("🖼️ 画像", "images", [f for f in image_files if f.is_file()]),
+        ("🎵 BGM", "bgm", [f for f in bgm_files if f.is_file()]),
+        ("🎬 素材動画", "videos", bg_videos),
+    ]
+
+    MAX_ZIP_MB = 500  # ZIPダウンロード上限(MB) — maxMessageSizeに合わせる
+
+    st.markdown("**カテゴリ別ダウンロード**")
+    dl_cols = st.columns(len(categories))
+    for col, (label, folder_name, files) in zip(dl_cols, categories):
+        with col:
+            if files:
+                size_mb = _dir_size_mb(files)
+                if size_mb > MAX_ZIP_MB:
+                    st.warning(f"{label} {size_mb:.0f}MB（ZIP上限超過）")
+                    # 個別ファイルダウンロードにフォールバック（2ステップ）
+                    file_options = {
+                        f"{f.name} ({f.stat().st_size / (1024*1024):.0f}MB)": str(f)
+                        for f in files
+                    }
+                    selected = st.selectbox(
+                        "ファイルを選択",
+                        options=list(file_options.keys()),
+                        key=f"sel_{folder_name}",
+                    )
+                    ready_key = f"ready_ind_{folder_name}"
+                    if st.button("📦 ダウンロード準備", key=f"prep_ind_{folder_name}"):
+                        st.session_state[ready_key] = file_options.get(selected, "")
+                    ready_path_str = st.session_state.get(ready_key, "")
+                    if (
+                        ready_path_str
+                        and selected
+                        and file_options.get(selected) == ready_path_str
+                    ):
+                        ready_file = Path(ready_path_str)
+                        if ready_file.exists():
+                            with open(ready_file, "rb") as sf:
+                                st.download_button(
+                                    label="📥 ダウンロード",
+                                    data=sf,
+                                    file_name=ready_file.name,
+                                    mime="application/octet-stream",
+                                    key=f"dl_{folder_name}_ind",
+                                )
+                    continue
+                zip_path = downloads_dir / f"{folder_name}.zip"
+                ready_key = f"zip_ready_{folder_name}"
+                if st.button(f"📦 {label} を準備 ({size_mb:.0f}MB)", key=f"prep_{folder_name}"):
+                    with st.spinner("ZIP作成中..."):
+                        _create_zip_to_disk(files, output_dir, zip_path)
+                    st.session_state[ready_key] = True
+                if st.session_state.get(ready_key) and zip_path.exists():
+                    zip_size_mb = zip_path.stat().st_size / (1024 * 1024)
+                    with open(zip_path, "rb") as zf:
+                        st.download_button(
+                            label=f"📥 ダウンロード ({zip_size_mb:.0f}MB)",
+                            data=zf,
+                            file_name=f"{folder_name}_{output_dir.name}.zip",
+                            mime="application/zip",
+                            key=f"dl_{folder_name}",
+                        )
+            else:
+                st.button(f"{label} なし", disabled=True, key=f"dl_{folder_name}")
+
+    # 一括ダウンロード（500MB以下の場合のみ）
+    all_output_files = [
+        f for f in output_dir.rglob("*")
+        if f.is_file() and not f.relative_to(output_dir).parts[0].startswith("_")
+    ]
+    total_mb = _dir_size_mb(all_output_files)
+    if total_mb <= MAX_ZIP_MB:
+        zip_path_all = downloads_dir / "all.zip"
+        ready_key_all = "zip_ready_all"
+        download_label = "生成物を一括ダウンロード" if st.session_state.generation_complete else "生成済み素材を一括ダウンロード"
+        if st.button(f"📦 {download_label} を準備 ({total_mb:.0f}MB)", key="prep_all"):
+            with st.spinner("一括ZIP作成中..."):
+                _create_zip_to_disk(all_output_files, output_dir, zip_path_all)
+            st.session_state[ready_key_all] = True
+        if st.session_state.get(ready_key_all) and zip_path_all.exists():
+            zip_size_mb = zip_path_all.stat().st_size / (1024 * 1024)
+            with open(zip_path_all, "rb") as zf:
+                st.download_button(
+                    label=f"📥 {download_label} ({zip_size_mb:.0f}MB)",
+                    data=zf,
+                    file_name=f"video_output_{output_dir.name}.zip",
+                    mime="application/zip",
+                    key="dl_all",
+                )
+    else:
+        st.info(f"📦 合計 {total_mb:.0f}MB のため、一括ダウンロードは無効です。カテゴリ別にダウンロードしてください。")
+
+    # 個別ファイル一覧
+    with st.expander("📁 生成ファイル一覧"):
+        for file_path in sorted(output_dir.rglob("*")):
+            if file_path.is_file() and not file_path.relative_to(output_dir).parts[0].startswith("_"):
+                st.text(f"  {file_path.relative_to(output_dir)}")
 
 
 def _clear_step_files(directory: Path, patterns: list[str], exclude_subdir: str | None = None) -> None:
@@ -2388,7 +2437,7 @@ def run_step_images(script, prompts, output_dir: Path, history_entry: dict | Non
 
         # 画像プロンプト自動生成
         user_specified = st.session_state.get("user_specified_num_images", 0)
-        should_regenerate = prompts.total_images == 0
+        should_regenerate = not prompts or prompts.total_images == 0
 
         if should_regenerate:
             if user_specified > 0:
@@ -2414,7 +2463,7 @@ def run_step_images(script, prompts, output_dir: Path, history_entry: dict | Non
                 st.warning(f"⚠️ 画像プロンプト自動生成エラー: {auto_err}")
 
         # 画像生成
-        if prompts.total_images > 0:
+        if prompts and prompts.total_images > 0:
             missing_prompts = [p for p in prompts.prompts if p.number not in generated_images]
 
             if missing_prompts:
