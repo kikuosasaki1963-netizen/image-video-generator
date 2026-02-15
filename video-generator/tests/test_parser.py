@@ -187,6 +187,22 @@ speaker1: これは読まれてはいけない。
         assert script.total_lines == 2
         assert "不動産投資について解説" in script.lines[0].text
 
+    def test_fullwidth_parentheses_scene_removed(self) -> None:
+        """全角括弧の情景補足が除去される"""
+        content = """speaker1:（驚いた表情で）これは大変です！
+speaker2:（悲しそうに）本当ですか？
+"""
+        parser = ScriptParser()
+        script = parser.parse_text(content)
+
+        assert script.total_lines == 2
+        assert script.lines[0].text == "これは大変です！"
+        assert script.lines[0].scene_description == "驚いた表情で"
+        assert script.lines[1].text == "本当ですか？"
+        assert script.lines[1].scene_description == "悲しそうに"
+        assert "表情" not in script.lines[0].text
+        assert "悲しそうに" not in script.lines[1].text
+
     def test_char_name_title_not_parsed(self) -> None:
         """キャラ名形式のタイトル行がセリフとして解析されない"""
         content = """タイトル

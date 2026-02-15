@@ -39,8 +39,8 @@ class Script:
 class ScriptParser:
     """台本パーサー"""
 
-    # 情景補足パターン: (ため息をついて) など
-    SCENE_PATTERN = re.compile(r"\(([^)]+)\)")
+    # 情景補足パターン: (ため息をついて)（驚いた表情で）など（半角・全角括弧対応）
+    SCENE_PATTERN = re.compile(r"[（(]([^)）]+)[)）]")
 
     # 読み仮名パターン: {漢字|読み} など
     READING_PATTERN = re.compile(r"\{([^|]+)\|([^}]+)\}")
