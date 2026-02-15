@@ -19,7 +19,6 @@ from src.bgm.beatoven import BeatovenClient
 from src.image.generator import ImageGenerator
 from src.parser.script import ScriptParser
 from src.utils.config import get_env_var, get_gcp_credentials, load_settings, save_settings
-from src.video.ai_generator import AIVideoGenerator
 from src.video.editor import Timeline, TimelineEntry, VideoEditor
 from src.video.stock import StockVideoClient
 
@@ -2411,6 +2410,8 @@ def run_step_bg_video(script, prompts, output_dir: Path, history_entry: dict | N
 def _generate_ai_videos(script, prompts, video_dir: Path, output_dir: Path, progress, status, duration_seconds: int = 8, max_clips: int = 5) -> dict:
     """AI（Veo）による背景動画生成"""
     import re as _re
+
+    from src.video.ai_generator import AIVideoGenerator
 
     background_videos = {}
     ai_gen = AIVideoGenerator()
