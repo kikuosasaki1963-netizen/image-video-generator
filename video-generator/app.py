@@ -2224,7 +2224,7 @@ def run_step_audio(script, output_dir: Path, history_entry: dict | None = None) 
             wav_path = tts.synthesize_script(
                 script, output_path,
                 progress_callback=update_progress,
-                allow_fallback=False,
+                allow_fallback=True,
             )
             st.session_state.audio_files["full"] = str(wav_path)
         else:
@@ -2252,12 +2252,6 @@ def run_step_audio(script, output_dir: Path, history_entry: dict | None = None) 
         error_lower = error_str.lower()
         is_rate_limit = any(x in error_lower for x in ["クォータ", "quota", "429", "rate", "limit"]) or "レート制限" in error_str
         is_partial = "一部失敗" in error_str
-        if is_partial:
-            st.warning(f"⚠️ {audio_err}")
-        elif is_rate_limit:
-            st.error("❌ 音声生成がレート制限に達しました")
-        else:
-            st.error(f"❌ 音声生成エラー: {audio_err}")
 
         # 生成済みファイルを検出して保存
         if audio_dir.exists():
@@ -2271,9 +2265,29 @@ def run_step_audio(script, output_dir: Path, history_entry: dict | None = None) 
                     except (ValueError, IndexError):
                         pass
 
+        has_full = "full" in st.session_state.audio_files
         generated_count = len(st.session_state.audio_files)
+
+        if is_partial and has_full:
+            # 一部セリフ失敗でもfull_audio.wavが生成済みなら成功扱い
+            st.warning(f"⚠️ {audio_err}")
+            st.info(f"💾 結合音声は生成済みのため続行できます（{generated_count}件）")
+            if history_entry:
+                history_entry["progress"]["audio_generated"] = True
+                history_entry["files"]["audio_files"] = dict(st.session_state.audio_files)
+                add_history_entry(history_entry)
+            gc.collect()
+            return {"success": True, "files": dict(st.session_state.audio_files), "error": error_str}
+
+        if is_partial:
+            st.warning(f"⚠️ {audio_err}")
+        elif is_rate_limit:
+            st.error("❌ 音声生成がレート制限に達しました。しばらく待ってから再生成してください。")
+        else:
+            st.error(f"❌ 音声生成エラー: {audio_err}")
+
         if generated_count > 0:
-            st.info(f"💾 生成済み音声: {generated_count}件を保存しました。")
+            st.info(f"💾 生成済み音声: {generated_count}件を保存しました。再生成で途中から再開できます。")
             if history_entry:
                 history_entry["progress"]["audio_generated"] = True
                 history_entry["files"]["audio_files"] = dict(st.session_state.audio_files)
