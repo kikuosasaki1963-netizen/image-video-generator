@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from src.utils.exceptions import (
+    AIVideoGenerationError,
     APIError,
     BGMGenerationError,
     ConfigurationError,
@@ -61,6 +62,17 @@ class TestExceptions:
         """StockVideoError のカスタムソース"""
         error = StockVideoError("stock failed", source="Pexels")
         assert error.service_name == "Pexels"
+
+    def test_ai_video_generation_error_service_name(self) -> None:
+        """AIVideoGenerationError のサービス名"""
+        error = AIVideoGenerationError("veo failed")
+        assert error.service_name == "Veo AI"
+
+    def test_ai_video_generation_error_with_original(self) -> None:
+        """AIVideoGenerationError に元エラーを含める"""
+        original = RuntimeError("timeout")
+        error = AIVideoGenerationError("veo failed", original_error=original)
+        assert error.original_error is original
 
     def test_configuration_error(self) -> None:
         """ConfigurationError のテスト"""

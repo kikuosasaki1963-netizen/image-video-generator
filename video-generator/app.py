@@ -19,6 +19,7 @@ from src.bgm.beatoven import BeatovenClient
 from src.image.generator import ImageGenerator
 from src.parser.script import ScriptParser
 from src.utils.config import get_env_var, get_gcp_credentials, load_settings, save_settings
+from src.video.ai_generator import AIVideoGenerator
 from src.video.editor import Timeline, TimelineEntry, VideoEditor
 from src.video.stock import StockVideoClient
 
@@ -1665,7 +1666,10 @@ def main_page() -> None:
                     elif pending_step == "bgm":
                         run_step_bgm(script, prompts, step_output_dir, step_history)
                     elif pending_step == "bg_video":
-                        run_step_bg_video(script, prompts, step_output_dir, step_history)
+                        use_ai = st.session_state.get("_pending_bg_source", "ストック") == "AI生成"
+                        ai_dur = st.session_state.get("_pending_ai_duration", 8)
+                        ai_clips = st.session_state.get("_pending_ai_max_clips", 5)
+                        run_step_bg_video(script, prompts, step_output_dir, step_history, use_ai=use_ai, ai_duration=ai_dur, ai_max_clips=ai_clips)
                     elif pending_step == "images":
                         run_step_images(script, prompts, step_output_dir, step_history)
                     elif pending_step == "timeline":
@@ -1710,13 +1714,39 @@ def main_page() -> None:
             # STEP 3: 背景動画
             s3_icon = "✅" if step_status["bg_video"] else "⬜"
             st.markdown(f"### {s3_icon} STEP 3: 背景動画取得")
-            s3_col1, s3_col2 = st.columns([3, 1])
+            s3_col1, s3_col2, s3_col3 = st.columns([2, 1, 1])
             with s3_col2:
+                bg_source = st.radio(
+                    "ソース",
+                    ["ストック", "AI生成"],
+                    horizontal=True,
+                    key="step_bg_source_radio",
+                    label_visibility="collapsed",
+                )
+                st.session_state._pending_bg_source = bg_source
+            with s3_col3:
                 s3_label = "🔄 再生成" if step_status["bg_video"] else "▶️ 生成開始"
                 if st.button(s3_label, key="step_bg_video_btn", width="stretch"):
                     st.session_state._pending_step = "bg_video"
                     st.session_state._pending_regen = step_status["bg_video"]
                     st.rerun()
+            if bg_source == "AI生成":
+                s3_opt1, s3_opt2 = st.columns(2)
+                with s3_opt1:
+                    st.session_state._pending_ai_duration = st.select_slider(
+                        "クリップ長（秒）",
+                        options=[5, 6, 7, 8],
+                        value=st.session_state.get("_pending_ai_duration", 8),
+                        key="step_ai_duration_slider",
+                    )
+                with s3_opt2:
+                    st.session_state._pending_ai_max_clips = st.slider(
+                        "最大クリップ数",
+                        min_value=1,
+                        max_value=10,
+                        value=st.session_state.get("_pending_ai_max_clips", 5),
+                        key="step_ai_max_clips_slider",
+                    )
 
             # STEP 4: 画像
             s4_icon = "✅" if step_status["images"] else "⬜"
@@ -1759,6 +1789,38 @@ def main_page() -> None:
             with col_bg_video:
                 generate_bg_video = st.checkbox("🎬 背景動画", value=True, key="generate_bg_video_checkbox")
 
+            if generate_bg_video:
+                batch_bg_source = st.radio(
+                    "背景動画ソース",
+                    ["ストック", "AI生成"],
+                    horizontal=True,
+                    key="batch_bg_source_radio",
+                )
+                if batch_bg_source == "AI生成":
+                    batch_opt1, batch_opt2 = st.columns(2)
+                    with batch_opt1:
+                        batch_ai_duration = st.select_slider(
+                            "クリップ長（秒）",
+                            options=[5, 6, 7, 8],
+                            value=8,
+                            key="batch_ai_duration_slider",
+                        )
+                    with batch_opt2:
+                        batch_ai_max_clips = st.slider(
+                            "最大クリップ数",
+                            min_value=1,
+                            max_value=10,
+                            value=5,
+                            key="batch_ai_max_clips_slider",
+                        )
+                else:
+                    batch_ai_duration = 8
+                    batch_ai_max_clips = 5
+            else:
+                batch_bg_source = "ストック"
+                batch_ai_duration = 8
+                batch_ai_max_clips = 5
+
             if not generate_audio and not generate_images and not generate_bgm and not generate_bg_video:
                 st.warning("⚠️ 少なくとも1つの素材を選択してください")
 
@@ -1772,7 +1834,14 @@ def main_page() -> None:
                 elif mode == "自動モード（完成動画出力）" and not output_formats:
                     st.error("❌ 出力形式を1つ以上選択してください")
                 else:
-                    run_generation(script, prompts, mode, output_formats, generate_audio, generate_images, generate_bgm, generate_bg_video)
+                    use_ai_bg = batch_bg_source == "AI生成"
+                    run_generation(
+                        script, prompts, mode, output_formats,
+                        generate_audio, generate_images, generate_bgm, generate_bg_video,
+                        use_ai_bg=use_ai_bg,
+                        ai_duration=batch_ai_duration,
+                        ai_max_clips=batch_ai_max_clips,
+                    )
 
     # STEP 5: 結果ダウンロード
     st.header("STEP 5: 結果ダウンロード")
@@ -2284,8 +2353,8 @@ def run_step_bgm(script, prompts, output_dir: Path, history_entry: dict | None =
     return {"success": bgm_path is not None, "files": {"bgm": str(bgm_path) if bgm_path else None}, "error": None}
 
 
-def run_step_bg_video(script, prompts, output_dir: Path, history_entry: dict | None = None) -> dict:
-    """ステップ3: 背景動画ダウンロード"""
+def run_step_bg_video(script, prompts, output_dir: Path, history_entry: dict | None = None, use_ai: bool = False, ai_duration: int = 8, ai_max_clips: int = 5) -> dict:
+    """ステップ3: 背景動画取得（AI生成 or ストック素材）"""
     import gc
     import re as _re
 
@@ -2311,91 +2380,21 @@ def run_step_bg_video(script, prompts, output_dir: Path, history_entry: dict | N
                 st.success(f"♻️ 既存の動画: {len(background_videos)}本をコピーしました")
 
         if not background_videos:
-            status.text("🎥 背景動画を検索中...")
-            stock_client = StockVideoClient()
-
-            _jp_to_en = {
-                "不動産": "real estate", "投資": "investment", "マンション": "apartment building",
-                "金利": "interest rate", "経済": "economy", "お金": "money finance",
-                "株": "stock market", "ビジネス": "business office", "会議": "meeting",
-                "グラフ": "chart graph", "上昇": "growth arrow", "下降": "decline",
-                "都市": "city skyline", "建物": "building architecture", "家": "house home",
-                "人": "people", "女性": "woman", "男性": "man", "笑顔": "smile happy",
-                "驚": "surprised", "怒": "angry", "悲": "sad", "喜": "happy celebration",
-                "炎": "fire flame", "水": "water ocean", "空": "sky clouds",
-                "夜": "night city", "朝": "morning sunrise", "自然": "nature landscape",
-                "テクノロジー": "technology", "コンピュータ": "computer", "データ": "data digital",
-                "選挙": "election voting", "政治": "politics government", "ニュース": "news broadcast",
-                "食事": "food dining", "料理": "cooking kitchen", "スーパー": "supermarket shopping",
-                "工場": "factory industrial", "半導体": "semiconductor technology",
-                "インフレ": "inflation economy", "価格": "price tag", "給料": "salary paycheck",
-            }
-
-            def _to_english_query(text: str) -> str:
-                matches = []
-                for jp, en in _jp_to_en.items():
-                    if jp in text:
-                        matches.append(en)
-                if matches:
-                    return " ".join(matches[:3])
-                return "abstract background motion"
-
-            chapter_pattern = _re.compile(r'【[\d:]+〜\s*(.+?)】')
-            raw_content = st.session_state.get("prompt_raw_content", "") or st.session_state.get("script_raw_content", "")
-            chapters = chapter_pattern.findall(raw_content)
-
-            # 背景動画数: 画像枚数の約半分（最大20本）
-            max_bg_videos = 20
-            if prompts and prompts.prompts:
-                target_count = min(max_bg_videos, max(1, len(prompts.prompts) // 2))
+            if use_ai:
+                background_videos = _generate_ai_videos(
+                    script, prompts, video_dir, output_dir, progress, status,
+                    duration_seconds=ai_duration, max_clips=ai_max_clips,
+                )
+                # AI生成が0件の場合、ストック素材にフォールバック
+                if not background_videos:
+                    st.warning("⚠️ AI動画生成が0件のため、ストック素材にフォールバックします")
+                    background_videos = _download_stock_videos(
+                        script, prompts, video_dir, output_dir, progress, status,
+                    )
             else:
-                target_count = max_bg_videos
-
-            if chapters:
-                # チャプター数がtarget_countより少なければ全部、多ければ間引き
-                if len(chapters) <= target_count:
-                    search_items = [(i + 1, _to_english_query(ch)) for i, ch in enumerate(chapters)]
-                else:
-                    ch_step = max(1, len(chapters) // target_count)
-                    search_items = [(i + 1, _to_english_query(chapters[i])) for i in range(0, len(chapters), ch_step)][:target_count]
-                st.info(f"📑 {len(chapters)}個のチャプターを検出 → {len(search_items)}本の背景動画を取得")
-            elif prompts and prompts.prompts:
-                step = max(1, len(prompts.prompts) // target_count)
-                selected = prompts.prompts[::step][:target_count]
-                search_items = [(p.number, _to_english_query(p.prompt)) for p in selected]
-            elif script and script.lines:
-                step = max(1, len(script.lines) // target_count)
-                selected = script.lines[::step][:target_count]
-                search_items = [(i + 1, _to_english_query(line.text)) for i, line in enumerate(selected)]
-            else:
-                search_items = [(1, "abstract background")]
-
-            for i, (number, search_query) in enumerate(search_items):
-                try:
-                    status.text(f"🎥 背景動画検索中: {i + 1}/{len(search_items)}")
-                    videos = stock_client.search_pexels(search_query, per_page=1)
-                    if videos:
-                        video_path = video_dir / f"{number:03d}_bg.mp4"
-                        stock_client.download(videos[0], video_path)
-                        background_videos[number] = str(video_path)
-                        st.success(f"✅ 背景動画 {number} ダウンロード完了")
-                    else:
-                        videos = stock_client.search_pixabay(search_query, per_page=1)
-                        if videos:
-                            video_path = video_dir / f"{number:03d}_bg.mp4"
-                            stock_client.download(videos[0], video_path)
-                            background_videos[number] = str(video_path)
-                            st.success(f"✅ 背景動画 {number} ダウンロード完了 (Pixabay)")
-                except Exception as vid_err:
-                    log_error_to_file(output_dir, f"背景動画取得エラー（{number}）", str(vid_err), traceback.format_exc())
-                    st.warning(f"⚠️ 背景動画取得エラー（{number}）: {vid_err}")
-
-                progress.progress((i + 1) / len(search_items))
-
-            if background_videos:
-                st.success(f"✅ 背景動画: {len(background_videos)}件準備完了")
-            else:
-                st.info("ℹ️ 背景動画なしで続行します")
+                background_videos = _download_stock_videos(
+                    script, prompts, video_dir, output_dir, progress, status,
+                )
 
     except Exception as bg_err:
         log_error_to_file(output_dir, "背景動画取得エラー", str(bg_err), traceback.format_exc())
@@ -2407,6 +2406,161 @@ def run_step_bg_video(script, prompts, output_dir: Path, history_entry: dict | N
 
     gc.collect()
     return {"success": bool(background_videos), "files": {"videos": background_videos}, "error": None}
+
+
+def _generate_ai_videos(script, prompts, video_dir: Path, output_dir: Path, progress, status, duration_seconds: int = 8, max_clips: int = 5) -> dict:
+    """AI（Veo）による背景動画生成"""
+    import re as _re
+
+    background_videos = {}
+    ai_gen = AIVideoGenerator()
+
+    # シーン抽出（UIで指定された最大クリップ数を使用）
+    max_ai_videos = max_clips
+
+    chapter_pattern = _re.compile(r'【[\d:]+〜\s*(.+?)】')
+    raw_content = st.session_state.get("prompt_raw_content", "") or st.session_state.get("script_raw_content", "")
+    chapters = chapter_pattern.findall(raw_content)
+
+    if chapters:
+        if len(chapters) <= max_ai_videos:
+            scene_items = [(i + 1, ch) for i, ch in enumerate(chapters)]
+        else:
+            ch_step = max(1, len(chapters) // max_ai_videos)
+            scene_items = [(i + 1, chapters[i]) for i in range(0, len(chapters), ch_step)][:max_ai_videos]
+        st.info(f"📑 {len(chapters)}個のチャプターを検出 → {len(scene_items)}本のAI動画を生成")
+    elif prompts and prompts.prompts:
+        target_count = min(max_ai_videos, len(prompts.prompts))
+        step = max(1, len(prompts.prompts) // target_count)
+        selected = prompts.prompts[::step][:target_count]
+        scene_items = [(p.number, p.prompt) for p in selected]
+    elif script and script.lines:
+        target_count = min(max_ai_videos, len(script.lines))
+        step = max(1, len(script.lines) // target_count)
+        selected = script.lines[::step][:target_count]
+        scene_items = [(i + 1, line.text) for i, line in enumerate(selected)]
+    else:
+        scene_items = [(1, "抽象的な背景映像")]
+
+    for i, (number, japanese_text) in enumerate(scene_items):
+        try:
+            status.text(f"🎬 AI動画生成中: {i + 1}/{len(scene_items)} - プロンプト翻訳中...")
+
+            # 日本語→英語プロンプト翻訳
+            en_prompt = ai_gen.generate_video_prompt(japanese_text)
+
+            # Veo APIで動画生成
+            video_path = video_dir / f"{number:03d}_bg.mp4"
+
+            def _progress_cb(msg: str) -> None:
+                status.text(f"🎬 動画 {i + 1}/{len(scene_items)}: {msg}")
+
+            ai_gen.generate(en_prompt, video_path, duration_seconds=duration_seconds, progress_callback=_progress_cb)
+            background_videos[number] = str(video_path)
+            st.success(f"✅ AI動画 {number} 生成完了")
+
+        except Exception as vid_err:
+            log_error_to_file(output_dir, f"AI動画生成エラー（{number}）", str(vid_err), traceback.format_exc())
+            st.warning(f"⚠️ AI動画生成エラー（{number}）: {vid_err}")
+
+        progress.progress((i + 1) / len(scene_items))
+
+    if background_videos:
+        st.success(f"✅ AI動画: {len(background_videos)}件生成完了")
+    return background_videos
+
+
+def _download_stock_videos(script, prompts, video_dir: Path, output_dir: Path, progress, status) -> dict:
+    """ストック素材（Pexels/Pixabay）による背景動画ダウンロード"""
+    import re as _re
+
+    background_videos = {}
+    status.text("🎥 背景動画を検索中...")
+    stock_client = StockVideoClient()
+
+    _jp_to_en = {
+        "不動産": "real estate", "投資": "investment", "マンション": "apartment building",
+        "金利": "interest rate", "経済": "economy", "お金": "money finance",
+        "株": "stock market", "ビジネス": "business office", "会議": "meeting",
+        "グラフ": "chart graph", "上昇": "growth arrow", "下降": "decline",
+        "都市": "city skyline", "建物": "building architecture", "家": "house home",
+        "人": "people", "女性": "woman", "男性": "man", "笑顔": "smile happy",
+        "驚": "surprised", "怒": "angry", "悲": "sad", "喜": "happy celebration",
+        "炎": "fire flame", "水": "water ocean", "空": "sky clouds",
+        "夜": "night city", "朝": "morning sunrise", "自然": "nature landscape",
+        "テクノロジー": "technology", "コンピュータ": "computer", "データ": "data digital",
+        "選挙": "election voting", "政治": "politics government", "ニュース": "news broadcast",
+        "食事": "food dining", "料理": "cooking kitchen", "スーパー": "supermarket shopping",
+        "工場": "factory industrial", "半導体": "semiconductor technology",
+        "インフレ": "inflation economy", "価格": "price tag", "給料": "salary paycheck",
+    }
+
+    def _to_english_query(text: str) -> str:
+        matches = []
+        for jp, en in _jp_to_en.items():
+            if jp in text:
+                matches.append(en)
+        if matches:
+            return " ".join(matches[:3])
+        return "abstract background motion"
+
+    chapter_pattern = _re.compile(r'【[\d:]+〜\s*(.+?)】')
+    raw_content = st.session_state.get("prompt_raw_content", "") or st.session_state.get("script_raw_content", "")
+    chapters = chapter_pattern.findall(raw_content)
+
+    # 背景動画数: 画像枚数の約半分（最大20本）
+    max_bg_videos = 20
+    if prompts and prompts.prompts:
+        target_count = min(max_bg_videos, max(1, len(prompts.prompts) // 2))
+    else:
+        target_count = max_bg_videos
+
+    if chapters:
+        # チャプター数がtarget_countより少なければ全部、多ければ間引き
+        if len(chapters) <= target_count:
+            search_items = [(i + 1, _to_english_query(ch)) for i, ch in enumerate(chapters)]
+        else:
+            ch_step = max(1, len(chapters) // target_count)
+            search_items = [(i + 1, _to_english_query(chapters[i])) for i in range(0, len(chapters), ch_step)][:target_count]
+        st.info(f"📑 {len(chapters)}個のチャプターを検出 → {len(search_items)}本の背景動画を取得")
+    elif prompts and prompts.prompts:
+        step = max(1, len(prompts.prompts) // target_count)
+        selected = prompts.prompts[::step][:target_count]
+        search_items = [(p.number, _to_english_query(p.prompt)) for p in selected]
+    elif script and script.lines:
+        step = max(1, len(script.lines) // target_count)
+        selected = script.lines[::step][:target_count]
+        search_items = [(i + 1, _to_english_query(line.text)) for i, line in enumerate(selected)]
+    else:
+        search_items = [(1, "abstract background")]
+
+    for i, (number, search_query) in enumerate(search_items):
+        try:
+            status.text(f"🎥 背景動画検索中: {i + 1}/{len(search_items)}")
+            videos = stock_client.search_pexels(search_query, per_page=1)
+            if videos:
+                video_path = video_dir / f"{number:03d}_bg.mp4"
+                stock_client.download(videos[0], video_path)
+                background_videos[number] = str(video_path)
+                st.success(f"✅ 背景動画 {number} ダウンロード完了")
+            else:
+                videos = stock_client.search_pixabay(search_query, per_page=1)
+                if videos:
+                    video_path = video_dir / f"{number:03d}_bg.mp4"
+                    stock_client.download(videos[0], video_path)
+                    background_videos[number] = str(video_path)
+                    st.success(f"✅ 背景動画 {number} ダウンロード完了 (Pixabay)")
+        except Exception as vid_err:
+            log_error_to_file(output_dir, f"背景動画取得エラー（{number}）", str(vid_err), traceback.format_exc())
+            st.warning(f"⚠️ 背景動画取得エラー（{number}）: {vid_err}")
+
+        progress.progress((i + 1) / len(search_items))
+
+    if background_videos:
+        st.success(f"✅ 背景動画: {len(background_videos)}件準備完了")
+    else:
+        st.info("ℹ️ 背景動画なしで続行します")
+    return background_videos
 
 
 def run_step_images(script, prompts, output_dir: Path, history_entry: dict | None = None) -> dict:
@@ -2706,7 +2860,7 @@ def run_step_timeline(script, prompts, mode: str, output_formats: list, output_d
     return {"success": True, "files": {}, "error": None}
 
 
-def run_generation(script, prompts, mode: str, output_formats: list, generate_audio: bool = True, generate_images: bool = True, generate_bgm: bool = False, generate_bg_video: bool = False) -> None:
+def run_generation(script, prompts, mode: str, output_formats: list, generate_audio: bool = True, generate_images: bool = True, generate_bgm: bool = False, generate_bg_video: bool = False, use_ai_bg: bool = False, ai_duration: int = 8, ai_max_clips: int = 5) -> None:
     """生成処理を実行（全ステップを順番に実行するラッパー）
 
     Args:
@@ -2714,6 +2868,9 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
         generate_images: 画像を生成するかどうか
         generate_bgm: BGMを生成するかどうか
         generate_bg_video: 背景動画を取得するかどうか
+        use_ai_bg: 背景動画にAI生成を使用するかどうか
+        ai_duration: AI動画のクリップ長（秒）
+        ai_max_clips: AI動画の最大クリップ数
     """
     # デバッグ: 選択されたモードを表示
     materials_info = []
@@ -2798,7 +2955,7 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
         # STEP 3: 背景動画
         bg_result = {"files": {"videos": {}}}
         if generate_bg_video:
-            bg_result = run_step_bg_video(script, prompts, output_dir, history_entry)
+            bg_result = run_step_bg_video(script, prompts, output_dir, history_entry, use_ai=use_ai_bg, ai_duration=ai_duration, ai_max_clips=ai_max_clips)
         else:
             st.info("⏭️ 背景動画の取得をスキップしました")
         overall_progress.progress(0.5)

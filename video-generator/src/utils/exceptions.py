@@ -64,6 +64,13 @@ class StockVideoError(APIError):
         super().__init__(message, source, original_error)
 
 
+class AIVideoGenerationError(APIError):
+    """Google Veo AI 動画生成 API エラー"""
+
+    def __init__(self, message: str, original_error: Exception | None = None) -> None:
+        super().__init__(message, "Veo AI", original_error)
+
+
 class ConfigurationError(VideoGeneratorError):
     """設定エラー（APIキー未設定など）"""
 

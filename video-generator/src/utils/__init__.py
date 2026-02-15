@@ -2,6 +2,7 @@
 
 from .config import get_env_var, get_gcp_credentials, load_settings, save_settings
 from .exceptions import (
+    AIVideoGenerationError,
     APIError,
     BGMGenerationError,
     ConfigurationError,
@@ -25,6 +26,7 @@ __all__ = [
     "ImageGenerationError",
     "BGMGenerationError",
     "StockVideoError",
+    "AIVideoGenerationError",
     "ConfigurationError",
     "RateLimitError",
     "with_retry",

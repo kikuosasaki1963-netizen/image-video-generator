@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.utils.exceptions import (
+    AIVideoGenerationError,
     BGMGenerationError,
     ConfigurationError,
     ImageGenerationError,
@@ -300,3 +301,136 @@ class TestStockVideoClient:
 
                     assert result == output_path
                     assert output_path.exists()
+
+
+class TestAIVideoGenerator:
+    """AIVideoGenerator のテスト"""
+
+    def test_missing_api_key_raises_error(self) -> None:
+        """APIキーがない場合エラー"""
+        with patch("src.video.ai_generator.load_settings", return_value={}):
+            with patch("src.video.ai_generator.get_env_var", return_value=None):
+                from src.video.ai_generator import AIVideoGenerator
+
+                generator = AIVideoGenerator()
+                with pytest.raises(ConfigurationError):
+                    generator._get_client()
+
+    def test_generate_video_prompt_success(self) -> None:
+        """プロンプト翻訳成功"""
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.text = "A cinematic shot of a modern apartment building"
+        mock_client.models.generate_content.return_value = mock_response
+
+        with patch("src.video.ai_generator.load_settings", return_value={}):
+            with patch("src.video.ai_generator.get_env_var", return_value="test_api_key"):
+                with patch("google.genai.Client", return_value=mock_client):
+                    from src.video.ai_generator import AIVideoGenerator
+
+                    generator = AIVideoGenerator()
+                    result = generator.generate_video_prompt("高層マンションの映像")
+
+                    assert result == "A cinematic shot of a modern apartment building"
+                    mock_client.models.generate_content.assert_called_once()
+
+    def test_generate_video_prompt_empty_response(self) -> None:
+        """プロンプト翻訳で空レスポンスの場合エラー"""
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.text = ""
+        mock_client.models.generate_content.return_value = mock_response
+
+        with patch("src.video.ai_generator.load_settings", return_value={}):
+            with patch("src.video.ai_generator.get_env_var", return_value="test_api_key"):
+                with patch("google.genai.Client", return_value=mock_client):
+                    from src.video.ai_generator import AIVideoGenerator
+
+                    generator = AIVideoGenerator()
+                    with pytest.raises(AIVideoGenerationError):
+                        generator.generate_video_prompt("テスト")
+
+    def test_generate_success(self, tmp_path: Path) -> None:
+        """動画生成成功"""
+        output_path = tmp_path / "output.mp4"
+
+        mock_client = MagicMock()
+
+        # 完了済みのoperationをモック
+        mock_video = MagicMock()
+        mock_video.video.uri = "https://example.com/video.mp4"
+        mock_operation = MagicMock()
+        mock_operation.done = True
+        mock_operation.response.generated_videos = [mock_video]
+        mock_client.models.generate_videos.return_value = mock_operation
+        mock_client.files.download.return_value = b"mock_video_data"
+
+        with patch("src.video.ai_generator.load_settings", return_value={}):
+            with patch("src.video.ai_generator.get_env_var", return_value="test_api_key"):
+                with patch("google.genai.Client", return_value=mock_client):
+                    from src.video.ai_generator import AIVideoGenerator
+
+                    generator = AIVideoGenerator()
+                    result = generator.generate("test prompt", output_path)
+
+                    assert result == output_path
+                    assert output_path.exists()
+                    assert output_path.read_bytes() == b"mock_video_data"
+
+    def test_generate_with_custom_duration(self, tmp_path: Path) -> None:
+        """カスタムクリップ長で動画生成"""
+        output_path = tmp_path / "output.mp4"
+
+        mock_client = MagicMock()
+        mock_video = MagicMock()
+        mock_video.video.uri = "https://example.com/video.mp4"
+        mock_operation = MagicMock()
+        mock_operation.done = True
+        mock_operation.response.generated_videos = [mock_video]
+        mock_client.models.generate_videos.return_value = mock_operation
+        mock_client.files.download.return_value = b"mock_video_data"
+
+        with patch("src.video.ai_generator.load_settings", return_value={}):
+            with patch("src.video.ai_generator.get_env_var", return_value="test_api_key"):
+                with patch("google.genai.Client", return_value=mock_client):
+                    from src.video.ai_generator import AIVideoGenerator
+
+                    generator = AIVideoGenerator()
+                    result = generator.generate("test prompt", output_path, duration_seconds=5)
+
+                    assert result == output_path
+                    # GenerateVideosConfig に duration_seconds=5 が渡されたことを確認
+                    call_kwargs = mock_client.models.generate_videos.call_args
+                    config = call_kwargs.kwargs.get("config") or call_kwargs[1].get("config")
+                    assert config.duration_seconds == 5
+
+    def test_generate_invalid_duration_raises_error(self, tmp_path: Path) -> None:
+        """サポート外のクリップ長でエラー"""
+        output_path = tmp_path / "output.mp4"
+
+        with patch("src.video.ai_generator.load_settings", return_value={}):
+            with patch("src.video.ai_generator.get_env_var", return_value="test_api_key"):
+                from src.video.ai_generator import AIVideoGenerator
+
+                generator = AIVideoGenerator()
+                with pytest.raises(AIVideoGenerationError, match="サポートされていないクリップ長"):
+                    generator.generate("test prompt", output_path, duration_seconds=3)
+
+    def test_generate_no_video_data_raises_error(self, tmp_path: Path) -> None:
+        """動画データなしの場合エラー"""
+        output_path = tmp_path / "output.mp4"
+
+        mock_client = MagicMock()
+        mock_operation = MagicMock()
+        mock_operation.done = True
+        mock_operation.response.generated_videos = []
+        mock_client.models.generate_videos.return_value = mock_operation
+
+        with patch("src.video.ai_generator.load_settings", return_value={}):
+            with patch("src.video.ai_generator.get_env_var", return_value="test_api_key"):
+                with patch("google.genai.Client", return_value=mock_client):
+                    from src.video.ai_generator import AIVideoGenerator
+
+                    generator = AIVideoGenerator()
+                    with pytest.raises(AIVideoGenerationError):
+                        generator.generate("test prompt", output_path)

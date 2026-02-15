@@ -62,5 +62,9 @@
         "orientation": "landscape",
         "size": "medium",
         "per_page": 5
+    },
+    "ai_video": {
+        "duration_seconds": 8,
+        "max_clips": 5
     }
 }
