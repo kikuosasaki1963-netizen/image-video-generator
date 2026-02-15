@@ -1388,7 +1388,7 @@ def main_page() -> None:
 
             st.dataframe(
                 df.style.apply(highlight_speaker, axis=1),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -1691,7 +1691,7 @@ def main_page() -> None:
             s1_col1, s1_col2 = st.columns([3, 1])
             with s1_col2:
                 s1_label = "🔄 再生成" if step_status["audio"] else "▶️ 生成開始"
-                if st.button(s1_label, key="step_audio_btn", use_container_width=True):
+                if st.button(s1_label, key="step_audio_btn", width="stretch"):
                     st.session_state._pending_step = "audio"
                     st.session_state._pending_regen = step_status["audio"]
                     st.rerun()
@@ -1702,7 +1702,7 @@ def main_page() -> None:
             s2_col1, s2_col2 = st.columns([3, 1])
             with s2_col2:
                 s2_label = "🔄 再生成" if step_status["bgm"] else "▶️ 生成開始"
-                if st.button(s2_label, key="step_bgm_btn", use_container_width=True):
+                if st.button(s2_label, key="step_bgm_btn", width="stretch"):
                     st.session_state._pending_step = "bgm"
                     st.session_state._pending_regen = step_status["bgm"]
                     st.rerun()
@@ -1713,7 +1713,7 @@ def main_page() -> None:
             s3_col1, s3_col2 = st.columns([3, 1])
             with s3_col2:
                 s3_label = "🔄 再生成" if step_status["bg_video"] else "▶️ 生成開始"
-                if st.button(s3_label, key="step_bg_video_btn", use_container_width=True):
+                if st.button(s3_label, key="step_bg_video_btn", width="stretch"):
                     st.session_state._pending_step = "bg_video"
                     st.session_state._pending_regen = step_status["bg_video"]
                     st.rerun()
@@ -1728,7 +1728,7 @@ def main_page() -> None:
             s4_col1, s4_col2 = st.columns([3, 1])
             with s4_col2:
                 s4_label = "🔄 再生成" if step_status["images"] else "▶️ 生成開始"
-                if st.button(s4_label, key="step_images_btn", use_container_width=True):
+                if st.button(s4_label, key="step_images_btn", width="stretch"):
                     st.session_state._pending_step = "images"
                     st.session_state._pending_regen = step_status["images"]
                     st.rerun()
@@ -1739,7 +1739,7 @@ def main_page() -> None:
             s5_col1, s5_col2 = st.columns([3, 1])
             with s5_col2:
                 s5_label = "🔄 再生成" if step_status["timeline"] else "▶️ 生成開始"
-                if st.button(s5_label, key="step_timeline_btn", use_container_width=True):
+                if st.button(s5_label, key="step_timeline_btn", width="stretch"):
                     st.session_state._pending_step = "timeline"
                     st.session_state._pending_regen = step_status["timeline"]
                     st.rerun()
@@ -1764,7 +1764,7 @@ def main_page() -> None:
 
             st.divider()
 
-            if st.button("🚀 生成を開始", type="primary", use_container_width=True):
+            if st.button("🚀 生成を開始", type="primary", width="stretch"):
                 if not generate_audio and not generate_images and not generate_bgm and not generate_bg_video:
                     st.error("❌ 少なくとも1つの素材を選択してください")
                 elif not all(api_status.values()):
