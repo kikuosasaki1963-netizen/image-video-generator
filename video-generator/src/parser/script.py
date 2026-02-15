@@ -55,13 +55,21 @@ class ScriptParser:
         re.compile(r"^■|^●|^◆|^▶|^◎|^★|^☆"),     # 記号見出し
         re.compile(r"^━+|^─+|^＝+|^=+|^-{3,}"),   # 装飾線
         re.compile(r"^#{1,6}\s"),                  # Markdownの見出し
-        re.compile(r"^タイトル[：:]"),              # タイトル行
+        re.compile(r"^タイトル"),                   # タイトル行（タイトル, タイトル:, タイトル案）
+        re.compile(r"^動画タイトル"),               # 動画タイトル
         re.compile(r"^テーマ[：:]"),               # テーマ行
         re.compile(r"^台本[：:]"),                  # 台本ラベル
         re.compile(r"^\d+[：:]\d+[〜~～]\d+[：:]\d+"),  # タイムレンジ 0:00〜1:30
         re.compile(r"^※"),                         # 注釈行
         re.compile(r"^[\[（\(].*[）\)\]]$"),       # 全体が括弧の行（ト書き）
         re.compile(r"^画像生成プロンプト|^BGM|^SE[：:]"),  # メタ指示
+        re.compile(r"^サムネ"),                     # サムネイル, サムネ案, サムネテキスト
+        re.compile(r"^概要"),                       # 概要欄, 概要文
+        re.compile(r"^ハッシュタグ"),               # ハッシュタグ
+        re.compile(r"^動画説明"),                   # 動画説明
+        re.compile(r"^(大|小|メイン)テキスト"),     # サムネ用テキストラベル
+        re.compile(r"^テキスト\d*[：:]"),           # テキスト:, テキスト1:
+        re.compile(r"^(テロップ|字幕|キャプション)"),  # テロップ・字幕指示
     ]
 
     # 話者パターン: speaker1:, Speaker 1:, ミオン：, アリイエ： など
@@ -89,8 +97,18 @@ class ScriptParser:
     # セクション区切り（これ以降のセリフ解析を停止）
     SCRIPT_END_PATTERNS = [
         re.compile(r"^画像生成プロンプト"),
-        re.compile(r"^サムネイル"),
+        re.compile(r"^サムネ"),             # サムネイル, サムネ案, サムネテキスト
         re.compile(r"^エンディング"),
+        re.compile(r"^概要欄"),
+        re.compile(r"^ハッシュタグ"),
+    ]
+
+    # セクションヘッダー（この行＋後続のコンテンツ行をスキップ）
+    SECTION_HEADER_PATTERNS = [
+        re.compile(r"^タイトル\s*$"),          # 「タイトル」単体行
+        re.compile(r"^タイトル[：:]?\s*$"),    # 「タイトル:」「タイトル：」
+        re.compile(r"^動画タイトル\s*$"),      # 「動画タイトル」単体行
+        re.compile(r"^サムネ"),                # サムネイル系セクション
     ]
 
     def parse_file(self, file_path: str | Path) -> Script:
@@ -177,6 +195,13 @@ class ScriptParser:
                 return True
         return False
 
+    def _is_section_header(self, text: str) -> bool:
+        """セクションヘッダー（後続行もスキップすべき）かどうか判定"""
+        for pattern in self.SECTION_HEADER_PATTERNS:
+            if pattern.search(text):
+                return True
+        return False
+
     def _match_speaker(self, raw_line: str) -> tuple[str, str] | None:
         """話者+テキスト行にマッチ（speaker形式 + キャラ名形式）"""
         # speaker1: テキスト 形式
@@ -238,6 +263,24 @@ class ScriptParser:
 
             # 非セリフ行をスキップ
             if self._is_non_dialogue(raw_line):
+                # セクションヘッダーの場合、後続のコンテンツ行もスキップ
+                # 空行が現れるまで（最大2行）スキップする
+                if self._is_section_header(raw_line):
+                    skipped = 0
+                    while i < len(lines) and skipped < 2:
+                        peek = lines[i].strip()
+                        if not peek:
+                            if skipped > 0:
+                                break  # コンテンツ後の空行＝セクション終了
+                            i += 1
+                            continue
+                        if self._is_script_end(peek):
+                            break
+                        if self._is_non_dialogue(peek):
+                            break
+                        # コンテンツ行をスキップ（タイトルテキスト等）
+                        i += 1
+                        skipped += 1
                 continue
 
             # 話者+テキスト行
@@ -309,19 +352,46 @@ class ScriptParser:
         script = Script(filename=filename)
         lines = content.split("\n")
 
+        # セリフ開始位置を検出
+        start_idx = self._find_script_start(lines)
+
         # 番号付き行のパターン（1. テキスト、1: テキスト、1) テキスト など）
         numbered_pattern = re.compile(r"^(\d+)[.:\)）、\s]+(.+)$")
 
         line_number = 0
         current_speaker = "speaker1"  # デフォルト話者
 
-        for raw_line in lines:
-            raw_line = raw_line.strip()
+        i = start_idx
+        while i < len(lines):
+            raw_line = lines[i].strip()
+            i += 1
             if not raw_line:
                 continue
 
+            # セリフ終了セクション
+            if self._is_script_end(raw_line):
+                break
+
             # 非セリフ行をスキップ
             if self._is_non_dialogue(raw_line):
+                # セクションヘッダーの場合、後続のコンテンツ行もスキップ
+                # 空行が現れるまで（最大2行）スキップする
+                if self._is_section_header(raw_line):
+                    skipped = 0
+                    while i < len(lines) and skipped < 2:
+                        peek = lines[i].strip()
+                        if not peek:
+                            if skipped > 0:
+                                break  # コンテンツ後の空行＝セクション終了
+                            i += 1
+                            continue
+                        if self._is_script_end(peek):
+                            break
+                        if self._is_non_dialogue(peek):
+                            break
+                        # コンテンツ行をスキップ（タイトルテキスト等）
+                        i += 1
+                        skipped += 1
                 continue
 
             # 番号付き行をチェック

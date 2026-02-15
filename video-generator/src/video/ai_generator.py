@@ -24,7 +24,7 @@ POLL_TIMEOUT = 360  # 最大6分
 # Veo がサポートするクリップ長（秒）
 SUPPORTED_DURATIONS = (5, 6, 7, 8)
 DEFAULT_DURATION = 8
-DEFAULT_MAX_CLIPS = 5
+DEFAULT_MAX_CLIPS = 10
 
 
 class AIVideoGenerator:

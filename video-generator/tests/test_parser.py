@@ -128,6 +128,80 @@ speaker2: 2番目のセリフ
         assert script.total_lines == 2
 
 
+    def test_title_and_thumbnail_excluded(self) -> None:
+        """タイトルとサムネイルが除外される"""
+        content = """タイトル
+衝撃！○○の真実を暴く！
+
+speaker1: こんにちは、今日は解説します。
+speaker2: よろしくお願いします。
+
+サムネイル
+大テキスト: 衝撃の事実
+小テキスト: ○○が大暴落
+"""
+        parser = ScriptParser()
+        script = parser.parse_text(content)
+
+        assert script.total_lines == 2
+        assert script.lines[0].text == "こんにちは、今日は解説します。"
+        assert script.lines[1].text == "よろしくお願いします。"
+
+    def test_title_with_colon_excluded(self) -> None:
+        """タイトル：付きの行が除外される"""
+        content = """タイトル：衝撃の真実
+speaker1: こんにちは。
+speaker2: さようなら。
+"""
+        parser = ScriptParser()
+        script = parser.parse_text(content)
+
+        assert script.total_lines == 2
+
+    def test_thumbnail_variations_excluded(self) -> None:
+        """サムネの各バリエーションで解析が停止する"""
+        content = """speaker1: セリフ1です。
+speaker2: セリフ2です。
+サムネ案
+speaker1: これは読まれてはいけない。
+"""
+        parser = ScriptParser()
+        script = parser.parse_text(content)
+
+        assert script.total_lines == 2
+
+    def test_title_section_skip_in_fallback(self) -> None:
+        """フォールバックパーサーでもタイトルが除外される"""
+        content = """タイトル
+衝撃！不動産投資の裏側を完全公開します！
+
+1. こんにちは、今日は不動産投資について解説します。
+2. よろしくお願いします。それでは早速見ていきましょう。
+
+サムネイル
+大テキスト: 衝撃の事実
+"""
+        parser = ScriptParser()
+        script = parser.parse_text(content)
+
+        assert script.total_lines == 2
+        assert "不動産投資について解説" in script.lines[0].text
+
+    def test_char_name_title_not_parsed(self) -> None:
+        """キャラ名形式のタイトル行がセリフとして解析されない"""
+        content = """タイトル
+ミオン：衝撃の真実を暴く！
+
+ミオン：こんにちは、今日は解説します。
+アリイエ：よろしくお願いします。
+"""
+        parser = ScriptParser()
+        script = parser.parse_text(content)
+
+        assert script.total_lines == 2
+        assert "こんにちは" in script.lines[0].text
+
+
 class TestImagePromptParser:
     """ImageGenerator のプロンプトパースのテスト"""
 

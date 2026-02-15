@@ -65,6 +65,6 @@
     },
     "ai_video": {
         "duration_seconds": 8,
-        "max_clips": 5
+        "max_clips": 10
     }
 }

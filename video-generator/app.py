@@ -1667,7 +1667,7 @@ def main_page() -> None:
                     elif pending_step == "bg_video":
                         use_ai = st.session_state.get("_pending_bg_source", "ストック") == "AI生成"
                         ai_dur = st.session_state.get("_pending_ai_duration", 8)
-                        ai_clips = st.session_state.get("_pending_ai_max_clips", 5)
+                        ai_clips = st.session_state.get("_pending_ai_max_clips", 10)
                         run_step_bg_video(script, prompts, step_output_dir, step_history, use_ai=use_ai, ai_duration=ai_dur, ai_max_clips=ai_clips)
                     elif pending_step == "images":
                         run_step_images(script, prompts, step_output_dir, step_history)
@@ -1742,8 +1742,8 @@ def main_page() -> None:
                     st.session_state._pending_ai_max_clips = st.slider(
                         "最大クリップ数",
                         min_value=1,
-                        max_value=10,
-                        value=st.session_state.get("_pending_ai_max_clips", 5),
+                        max_value=30,
+                        value=st.session_state.get("_pending_ai_max_clips", 10),
                         key="step_ai_max_clips_slider",
                     )
 
@@ -1808,17 +1808,17 @@ def main_page() -> None:
                         batch_ai_max_clips = st.slider(
                             "最大クリップ数",
                             min_value=1,
-                            max_value=10,
-                            value=5,
+                            max_value=30,
+                            value=10,
                             key="batch_ai_max_clips_slider",
                         )
                 else:
                     batch_ai_duration = 8
-                    batch_ai_max_clips = 5
+                    batch_ai_max_clips = 10
             else:
                 batch_bg_source = "ストック"
                 batch_ai_duration = 8
-                batch_ai_max_clips = 5
+                batch_ai_max_clips = 10
 
             if not generate_audio and not generate_images and not generate_bgm and not generate_bg_video:
                 st.warning("⚠️ 少なくとも1つの素材を選択してください")
@@ -2366,7 +2366,7 @@ def run_step_bgm(script, prompts, output_dir: Path, history_entry: dict | None =
     return {"success": bgm_path is not None, "files": {"bgm": str(bgm_path) if bgm_path else None}, "error": None}
 
 
-def run_step_bg_video(script, prompts, output_dir: Path, history_entry: dict | None = None, use_ai: bool = False, ai_duration: int = 8, ai_max_clips: int = 5) -> dict:
+def run_step_bg_video(script, prompts, output_dir: Path, history_entry: dict | None = None, use_ai: bool = False, ai_duration: int = 8, ai_max_clips: int = 10) -> dict:
     """ステップ3: 背景動画取得（AI生成 or ストック素材）"""
     import gc
     import re as _re
@@ -2423,6 +2423,7 @@ def run_step_bg_video(script, prompts, output_dir: Path, history_entry: dict | N
 
 def _generate_ai_videos(script, prompts, video_dir: Path, output_dir: Path, progress, status, duration_seconds: int = 8, max_clips: int = 5) -> dict:
     """AI（Veo）による背景動画生成"""
+    import math
     import re as _re
 
     from src.video.ai_generator import AIVideoGenerator
@@ -2430,8 +2431,39 @@ def _generate_ai_videos(script, prompts, video_dir: Path, output_dir: Path, prog
     background_videos = {}
     ai_gen = AIVideoGenerator()
 
+    # 音声の長さを取得して必要クリップ数を推定
+    audio_duration = 0.0
+    if st.session_state.get("audio_files"):
+        try:
+            from moviepy import AudioFileClip
+            if "full" in st.session_state.audio_files:
+                clip = AudioFileClip(st.session_state.audio_files["full"])
+                audio_duration = clip.duration
+                clip.close()
+            else:
+                for ap in st.session_state.audio_files.values():
+                    clip = AudioFileClip(ap)
+                    audio_duration += clip.duration
+                    clip.close()
+        except Exception:
+            pass
+
+    if audio_duration > 0:
+        recommended_clips = math.ceil(audio_duration / duration_seconds)
+        st.info(
+            f"📊 音声長: {audio_duration:.0f}秒 → 推奨クリップ数: {recommended_clips}本"
+            f"（{duration_seconds}秒×{max_clips}本={duration_seconds * max_clips}秒分を生成）"
+        )
+
     # シーン抽出（UIで指定された最大クリップ数を使用）
     max_ai_videos = max_clips
+
+    # 全プロンプト番号を収集（後でクリップを全セグメントに配布する用）
+    all_prompt_numbers = []
+    if prompts and prompts.prompts:
+        all_prompt_numbers = [p.number for p in prompts.prompts]
+    elif script and script.lines:
+        all_prompt_numbers = [i + 1 for i in range(len(script.lines))]
 
     chapter_pattern = _re.compile(r'【[\d:]+〜\s*(.+?)】')
     raw_content = st.session_state.get("prompt_raw_content", "") or st.session_state.get("script_raw_content", "")
@@ -2480,8 +2512,21 @@ def _generate_ai_videos(script, prompts, video_dir: Path, output_dir: Path, prog
 
         progress.progress((i + 1) / len(scene_items))
 
+    # 生成されたクリップを全プロンプトに配布（各クリップが隣接セグメントもカバー）
+    if background_videos and all_prompt_numbers:
+        generated_numbers = sorted(background_videos.keys())
+        spread_videos = {}
+        for pn in all_prompt_numbers:
+            # 最も近い生成済みクリップを割り当て
+            closest = min(generated_numbers, key=lambda g: abs(g - pn))
+            spread_videos[pn] = background_videos[closest]
+        added_count = len(spread_videos) - len(background_videos)
+        if added_count > 0:
+            st.info(f"🔄 {len(background_videos)}本のAI動画を{len(spread_videos)}セグメントに配布しました")
+        background_videos = spread_videos
+
     if background_videos:
-        st.success(f"✅ AI動画: {len(background_videos)}件生成完了")
+        st.success(f"✅ AI動画: {len(background_videos)}セグメント分準備完了")
     return background_videos
 
 
@@ -2571,8 +2616,23 @@ def _download_stock_videos(script, prompts, video_dir: Path, output_dir: Path, p
 
         progress.progress((i + 1) / len(search_items))
 
+    # 生成されたクリップを全プロンプトに配布
     if background_videos:
-        st.success(f"✅ 背景動画: {len(background_videos)}件準備完了")
+        all_pn = []
+        if prompts and prompts.prompts:
+            all_pn = [p.number for p in prompts.prompts]
+        elif script and script.lines:
+            all_pn = [i + 1 for i in range(len(script.lines))]
+        if all_pn:
+            generated_numbers = sorted(background_videos.keys())
+            spread = {}
+            for pn in all_pn:
+                closest = min(generated_numbers, key=lambda g: abs(g - pn))
+                spread[pn] = background_videos[closest]
+            background_videos = spread
+
+    if background_videos:
+        st.success(f"✅ 背景動画: {len(background_videos)}セグメント分準備完了")
     else:
         st.info("ℹ️ 背景動画なしで続行します")
     return background_videos
@@ -2875,7 +2935,7 @@ def run_step_timeline(script, prompts, mode: str, output_formats: list, output_d
     return {"success": True, "files": {}, "error": None}
 
 
-def run_generation(script, prompts, mode: str, output_formats: list, generate_audio: bool = True, generate_images: bool = True, generate_bgm: bool = False, generate_bg_video: bool = False, use_ai_bg: bool = False, ai_duration: int = 8, ai_max_clips: int = 5) -> None:
+def run_generation(script, prompts, mode: str, output_formats: list, generate_audio: bool = True, generate_images: bool = True, generate_bgm: bool = False, generate_bg_video: bool = False, use_ai_bg: bool = False, ai_duration: int = 8, ai_max_clips: int = 10) -> None:
     """生成処理を実行（全ステップを順番に実行するラッパー）
 
     Args:
