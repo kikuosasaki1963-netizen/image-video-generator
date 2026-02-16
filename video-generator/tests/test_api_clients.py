@@ -434,3 +434,125 @@ class TestAIVideoGenerator:
                     generator = AIVideoGenerator()
                     with pytest.raises(AIVideoGenerationError):
                         generator.generate("test prompt", output_path)
+
+    def test_generate_multiple_success(self, tmp_path: Path) -> None:
+        """複数動画同時生成が正常に返る"""
+        mock_client = MagicMock()
+
+        mock_video_a = MagicMock()
+        mock_video_a.video.uri = "https://example.com/video_a.mp4"
+        mock_video_b = MagicMock()
+        mock_video_b.video.uri = "https://example.com/video_b.mp4"
+
+        mock_operation = MagicMock()
+        mock_operation.done = True
+        mock_operation.response.generated_videos = [mock_video_a, mock_video_b]
+        mock_client.models.generate_videos.return_value = mock_operation
+        mock_client.files.download.return_value = b"mock_video_data"
+
+        with patch("src.video.ai_generator.load_settings", return_value={}):
+            with patch("src.video.ai_generator.get_env_var", return_value="test_api_key"):
+                with patch("google.genai.Client", return_value=mock_client):
+                    from src.video.ai_generator import AIVideoGenerator
+
+                    generator = AIVideoGenerator()
+                    results = generator.generate_multiple(
+                        "test prompt", tmp_path, "001_bg",
+                        number_of_videos=2,
+                    )
+
+                    assert len(results) == 2
+                    assert results[0].name == "001_bg_a.mp4"
+                    assert results[1].name == "001_bg_b.mp4"
+                    for p in results:
+                        assert p.exists()
+                        assert p.read_bytes() == b"mock_video_data"
+
+    def test_generate_multiple_partial(self, tmp_path: Path) -> None:
+        """URIが一部欠損でも取得分を返す"""
+        mock_client = MagicMock()
+
+        mock_video_a = MagicMock()
+        mock_video_a.video.uri = "https://example.com/video_a.mp4"
+        mock_video_b = MagicMock()
+        mock_video_b.video = None  # URI欠損
+
+        mock_operation = MagicMock()
+        mock_operation.done = True
+        mock_operation.response.generated_videos = [mock_video_a, mock_video_b]
+        mock_client.models.generate_videos.return_value = mock_operation
+        mock_client.files.download.return_value = b"mock_video_data"
+
+        with patch("src.video.ai_generator.load_settings", return_value={}):
+            with patch("src.video.ai_generator.get_env_var", return_value="test_api_key"):
+                with patch("google.genai.Client", return_value=mock_client):
+                    from src.video.ai_generator import AIVideoGenerator
+
+                    generator = AIVideoGenerator()
+                    results = generator.generate_multiple(
+                        "test prompt", tmp_path, "002_bg",
+                        number_of_videos=2,
+                    )
+
+                    assert len(results) == 1
+                    assert results[0].name == "002_bg_a.mp4"
+
+    def test_generate_backward_compat(self, tmp_path: Path) -> None:
+        """既存 generate() が変わらず動作"""
+        output_path = tmp_path / "compat.mp4"
+
+        mock_client = MagicMock()
+        mock_video = MagicMock()
+        mock_video.video.uri = "https://example.com/video.mp4"
+        mock_operation = MagicMock()
+        mock_operation.done = True
+        mock_operation.response.generated_videos = [mock_video]
+        mock_client.models.generate_videos.return_value = mock_operation
+        mock_client.files.download.return_value = b"compat_data"
+
+        with patch("src.video.ai_generator.load_settings", return_value={}):
+            with patch("src.video.ai_generator.get_env_var", return_value="test_api_key"):
+                with patch("google.genai.Client", return_value=mock_client):
+                    from src.video.ai_generator import AIVideoGenerator
+
+                    generator = AIVideoGenerator()
+                    result = generator.generate("test prompt", output_path)
+
+                    assert result == output_path
+                    assert output_path.read_bytes() == b"compat_data"
+                    # number_of_videos=1 が渡されたことを確認
+                    call_kwargs = mock_client.models.generate_videos.call_args
+                    config = call_kwargs.kwargs.get("config") or call_kwargs[1].get("config")
+                    assert config.number_of_videos == 1
+
+    def test_speed_factor_property(self) -> None:
+        """speed_factor設定値の読み取り"""
+        settings = {"ai_video": {"speed_factor": 0.5}}
+        with patch("src.video.ai_generator.load_settings", return_value=settings):
+            from src.video.ai_generator import AIVideoGenerator
+
+            generator = AIVideoGenerator()
+            assert generator.default_speed_factor == 0.5
+
+        # デフォルト値
+        with patch("src.video.ai_generator.load_settings", return_value={}):
+            from src.video.ai_generator import AIVideoGenerator
+
+            generator = AIVideoGenerator()
+            assert generator.default_speed_factor == 1.0
+
+    def test_number_of_videos_property(self) -> None:
+        """number_of_videos設定値の読み取り"""
+        settings = {"ai_video": {"number_of_videos": 3}}
+        with patch("src.video.ai_generator.load_settings", return_value=settings):
+            from src.video.ai_generator import AIVideoGenerator
+
+            generator = AIVideoGenerator()
+            assert generator.default_number_of_videos == 3
+
+        # デフォルト値
+        with patch("src.video.ai_generator.load_settings", return_value={}):
+            from src.video.ai_generator import AIVideoGenerator
+
+            generator = AIVideoGenerator()
+            assert generator.default_number_of_videos == 1

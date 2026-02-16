@@ -1665,10 +1665,18 @@ def main_page() -> None:
                     elif pending_step == "bgm":
                         run_step_bgm(script, prompts, step_output_dir, step_history)
                     elif pending_step == "bg_video":
-                        use_ai = st.session_state.get("_pending_bg_source", "ストック") == "AI生成"
+                        _bg_src = st.session_state.get("_pending_bg_source", "ストック")
+                        use_ai = _bg_src == "AI生成"
+                        use_hybrid = _bg_src == "ハイブリッド"
                         ai_dur = st.session_state.get("_pending_ai_duration", 8)
                         ai_clips = st.session_state.get("_pending_ai_max_clips", 10)
-                        run_step_bg_video(script, prompts, step_output_dir, step_history, use_ai=use_ai, ai_duration=ai_dur, ai_max_clips=ai_clips)
+                        spd = st.session_state.get("_pending_speed_factor", 1.0)
+                        nvid = st.session_state.get("_pending_number_of_videos", 1)
+                        run_step_bg_video(
+                            script, prompts, step_output_dir, step_history,
+                            use_ai=use_ai, ai_duration=ai_dur, ai_max_clips=ai_clips,
+                            speed_factor=spd, number_of_videos=nvid, hybrid=use_hybrid,
+                        )
                     elif pending_step == "images":
                         run_step_images(script, prompts, step_output_dir, step_history)
                     elif pending_step == "timeline":
@@ -1717,7 +1725,7 @@ def main_page() -> None:
             with s3_col2:
                 bg_source = st.radio(
                     "ソース",
-                    ["ストック", "AI生成"],
+                    ["ストック", "AI生成", "ハイブリッド"],
                     horizontal=True,
                     key="step_bg_source_radio",
                     label_visibility="collapsed",
@@ -1729,7 +1737,7 @@ def main_page() -> None:
                     st.session_state._pending_step = "bg_video"
                     st.session_state._pending_regen = step_status["bg_video"]
                     st.rerun()
-            if bg_source == "AI生成":
+            if bg_source in ("AI生成", "ハイブリッド"):
                 s3_opt1, s3_opt2 = st.columns(2)
                 with s3_opt1:
                     st.session_state._pending_ai_duration = st.select_slider(
@@ -1746,6 +1754,29 @@ def main_page() -> None:
                         value=st.session_state.get("_pending_ai_max_clips", 10),
                         key="step_ai_max_clips_slider",
                     )
+                s3_opt3, s3_opt4 = st.columns(2)
+                with s3_opt3:
+                    st.session_state._pending_speed_factor = st.select_slider(
+                        "再生速度",
+                        options=[0.25, 0.5, 0.75, 1.0],
+                        value=st.session_state.get("_pending_speed_factor", 0.5),
+                        format_func=lambda x: f"{x}x",
+                        key="step_speed_factor_slider",
+                    )
+                with s3_opt4:
+                    st.session_state._pending_number_of_videos = st.select_slider(
+                        "同時生成数/プロンプト",
+                        options=[1, 2, 3, 4],
+                        value=st.session_state.get("_pending_number_of_videos", 1),
+                        key="step_number_of_videos_slider",
+                    )
+                # 推定カバー時間表示
+                _dur = st.session_state.get("_pending_ai_duration", 8)
+                _clips = st.session_state.get("_pending_ai_max_clips", 10)
+                _spd = st.session_state.get("_pending_speed_factor", 0.5)
+                _nvid = st.session_state.get("_pending_number_of_videos", 1)
+                _est = _dur * _clips * _nvid / _spd if _spd > 0 else 0
+                st.caption(f"推定カバー: {_dur}秒 × {_clips}本 × {_nvid}/プロンプト ÷ {_spd}x = **{_est:.0f}秒**")
 
             # STEP 4: 画像
             s4_icon = "✅" if step_status["images"] else "⬜"
@@ -1791,11 +1822,11 @@ def main_page() -> None:
             if generate_bg_video:
                 batch_bg_source = st.radio(
                     "背景動画ソース",
-                    ["ストック", "AI生成"],
+                    ["ストック", "AI生成", "ハイブリッド"],
                     horizontal=True,
                     key="batch_bg_source_radio",
                 )
-                if batch_bg_source == "AI生成":
+                if batch_bg_source in ("AI生成", "ハイブリッド"):
                     batch_opt1, batch_opt2 = st.columns(2)
                     with batch_opt1:
                         batch_ai_duration = st.select_slider(
@@ -1812,13 +1843,36 @@ def main_page() -> None:
                             value=10,
                             key="batch_ai_max_clips_slider",
                         )
+                    batch_opt3, batch_opt4 = st.columns(2)
+                    with batch_opt3:
+                        batch_speed_factor = st.select_slider(
+                            "再生速度",
+                            options=[0.25, 0.5, 0.75, 1.0],
+                            value=0.5,
+                            format_func=lambda x: f"{x}x",
+                            key="batch_speed_factor_slider",
+                        )
+                    with batch_opt4:
+                        batch_number_of_videos = st.select_slider(
+                            "同時生成数/プロンプト",
+                            options=[1, 2, 3, 4],
+                            value=1,
+                            key="batch_number_of_videos_slider",
+                        )
+                    # 推定カバー時間表示
+                    _b_est = batch_ai_duration * batch_ai_max_clips * batch_number_of_videos / batch_speed_factor if batch_speed_factor > 0 else 0
+                    st.caption(f"推定カバー: {batch_ai_duration}秒 × {batch_ai_max_clips}本 × {batch_number_of_videos}/プロンプト ÷ {batch_speed_factor}x = **{_b_est:.0f}秒**")
                 else:
                     batch_ai_duration = 8
                     batch_ai_max_clips = 10
+                    batch_speed_factor = 1.0
+                    batch_number_of_videos = 1
             else:
                 batch_bg_source = "ストック"
                 batch_ai_duration = 8
                 batch_ai_max_clips = 10
+                batch_speed_factor = 1.0
+                batch_number_of_videos = 1
 
             if not generate_audio and not generate_images and not generate_bgm and not generate_bg_video:
                 st.warning("⚠️ 少なくとも1つの素材を選択してください")
@@ -1834,12 +1888,16 @@ def main_page() -> None:
                     st.error("❌ 出力形式を1つ以上選択してください")
                 else:
                     use_ai_bg = batch_bg_source == "AI生成"
+                    use_hybrid_bg = batch_bg_source == "ハイブリッド"
                     run_generation(
                         script, prompts, mode, output_formats,
                         generate_audio, generate_images, generate_bgm, generate_bg_video,
                         use_ai_bg=use_ai_bg,
                         ai_duration=batch_ai_duration,
                         ai_max_clips=batch_ai_max_clips,
+                        speed_factor=batch_speed_factor,
+                        number_of_videos=batch_number_of_videos,
+                        hybrid=use_hybrid_bg,
                     )
 
     # STEP 5: 結果ダウンロード
@@ -2366,8 +2424,8 @@ def run_step_bgm(script, prompts, output_dir: Path, history_entry: dict | None =
     return {"success": bgm_path is not None, "files": {"bgm": str(bgm_path) if bgm_path else None}, "error": None}
 
 
-def run_step_bg_video(script, prompts, output_dir: Path, history_entry: dict | None = None, use_ai: bool = False, ai_duration: int = 8, ai_max_clips: int = 10) -> dict:
-    """ステップ3: 背景動画取得（AI生成 or ストック素材）"""
+def run_step_bg_video(script, prompts, output_dir: Path, history_entry: dict | None = None, use_ai: bool = False, ai_duration: int = 8, ai_max_clips: int = 10, speed_factor: float = 1.0, number_of_videos: int = 1, hybrid: bool = False) -> dict:
+    """ステップ3: 背景動画取得（AI生成 or ストック素材 or ハイブリッド）"""
     import gc
     import re as _re
 
@@ -2393,10 +2451,49 @@ def run_step_bg_video(script, prompts, output_dir: Path, history_entry: dict | N
                 st.success(f"♻️ 既存の動画: {len(background_videos)}本をコピーしました")
 
         if not background_videos:
-            if use_ai:
+            if hybrid:
+                # ハイブリッドモード: AI生成 → 未カバーをストック補完
+                ai_videos = _generate_ai_videos(
+                    script, prompts, video_dir, output_dir, progress, status,
+                    duration_seconds=ai_duration, max_clips=ai_max_clips,
+                    speed_factor=speed_factor, number_of_videos=number_of_videos,
+                    skip_spread=True,
+                )
+                background_videos.update(ai_videos)
+
+                # 全プロンプト番号を収集
+                all_prompt_numbers = []
+                if prompts and prompts.prompts:
+                    all_prompt_numbers = [p.number for p in prompts.prompts]
+                elif script and script.lines:
+                    all_prompt_numbers = [i + 1 for i in range(len(script.lines))]
+
+                # AI済みの整数番号を取得
+                ai_covered = {int(k) for k in ai_videos.keys()}
+                uncovered = [pn for pn in all_prompt_numbers if pn not in ai_covered]
+
+                if uncovered:
+                    st.info(f"🔀 ハイブリッド: AI={len(ai_covered)}セグメント、ストック補完={len(uncovered)}セグメント")
+                    stock_videos = _download_stock_videos(
+                        script, prompts, video_dir, output_dir, progress, status,
+                        target_numbers=uncovered,
+                    )
+                    background_videos.update(stock_videos)
+
+                # 最終配布（全セグメントカバー）
+                if background_videos and all_prompt_numbers:
+                    generated_numbers = sorted(background_videos.keys())
+                    spread = {}
+                    for pn in all_prompt_numbers:
+                        closest = min(generated_numbers, key=lambda g: abs(g - pn))
+                        spread[pn] = background_videos[closest]
+                    background_videos = spread
+
+            elif use_ai:
                 background_videos = _generate_ai_videos(
                     script, prompts, video_dir, output_dir, progress, status,
                     duration_seconds=ai_duration, max_clips=ai_max_clips,
+                    speed_factor=speed_factor, number_of_videos=number_of_videos,
                 )
                 # AI生成が0件の場合、ストック素材にフォールバック
                 if not background_videos:
@@ -2421,7 +2518,25 @@ def run_step_bg_video(script, prompts, output_dir: Path, history_entry: dict | N
     return {"success": bool(background_videos), "files": {"videos": background_videos}, "error": None}
 
 
-def _generate_ai_videos(script, prompts, video_dir: Path, output_dir: Path, progress, status, duration_seconds: int = 8, max_clips: int = 5) -> dict:
+def _apply_slow_motion(video_path: Path, speed_factor: float) -> None:
+    """動画にスローモーション効果を適用（上書き保存）"""
+    try:
+        from moviepy import VideoFileClip, vfx
+
+        clip = VideoFileClip(str(video_path))
+        slow = clip.with_effects([vfx.MultiplySpeed(factor=speed_factor)])
+        temp = video_path.with_suffix(".slow.mp4")
+        slow.write_videofile(str(temp), codec="libx264", audio=False, logger=None)
+        slow.close()
+        clip.close()
+        temp.replace(video_path)
+    except Exception as e:
+        import logging
+
+        logging.getLogger(__name__).warning("スローモーション適用失敗（元動画を使用）: %s", e)
+
+
+def _generate_ai_videos(script, prompts, video_dir: Path, output_dir: Path, progress, status, duration_seconds: int = 8, max_clips: int = 5, speed_factor: float = 1.0, number_of_videos: int = 1, skip_spread: bool = False) -> dict:
     """AI（Veo）による背景動画生成"""
     import math
     import re as _re
@@ -2448,11 +2563,15 @@ def _generate_ai_videos(script, prompts, video_dir: Path, output_dir: Path, prog
         except Exception:
             pass
 
+    effective_duration = duration_seconds / speed_factor if speed_factor > 0 else duration_seconds
+    total_coverage = effective_duration * max_clips * number_of_videos
+
     if audio_duration > 0:
         recommended_clips = math.ceil(audio_duration / duration_seconds)
         st.info(
-            f"📊 音声長: {audio_duration:.0f}秒 → 推奨クリップ数: {recommended_clips}本"
-            f"（{duration_seconds}秒×{max_clips}本={duration_seconds * max_clips}秒分を生成）"
+            f"📊 音声長: {audio_duration:.0f}秒 → "
+            f"{duration_seconds}秒 × {max_clips}本 × {number_of_videos}/プロンプト ÷ {speed_factor}x "
+            f"= {total_coverage:.0f}秒分を生成"
         )
 
     # シーン抽出（UIで指定された最大クリップ数を使用）
@@ -2496,15 +2615,28 @@ def _generate_ai_videos(script, prompts, video_dir: Path, output_dir: Path, prog
             # 日本語→英語プロンプト翻訳
             en_prompt = ai_gen.generate_video_prompt(japanese_text)
 
-            # Veo APIで動画生成
-            video_path = video_dir / f"{number:03d}_bg.mp4"
-
             def _progress_cb(msg: str) -> None:
                 status.text(f"🎬 動画 {i + 1}/{len(scene_items)}: {msg}")
 
-            ai_gen.generate(en_prompt, video_path, duration_seconds=duration_seconds, progress_callback=_progress_cb)
-            background_videos[number] = str(video_path)
-            st.success(f"✅ AI動画 {number} 生成完了")
+            # generate_multiple() で複数動画を同時生成
+            generated_paths = ai_gen.generate_multiple(
+                en_prompt, video_dir, f"{number:03d}_bg",
+                duration_seconds=duration_seconds,
+                number_of_videos=number_of_videos,
+                progress_callback=_progress_cb,
+            )
+
+            # スローモーション適用 & background_videos に登録
+            for vi, vpath in enumerate(generated_paths):
+                if speed_factor < 1.0:
+                    status.text(f"🐢 スローモーション適用中: {vpath.name}")
+                    _apply_slow_motion(vpath, speed_factor)
+
+                # 1本目は元番号、2本目以降は number + 0.01*vi で区別
+                vid_key = number if vi == 0 else number + 0.01 * vi
+                background_videos[vid_key] = str(vpath)
+
+            st.success(f"✅ AI動画 {number} 生成完了（{len(generated_paths)}本）")
 
         except Exception as vid_err:
             log_error_to_file(output_dir, f"AI動画生成エラー（{number}）", str(vid_err), traceback.format_exc())
@@ -2513,7 +2645,7 @@ def _generate_ai_videos(script, prompts, video_dir: Path, output_dir: Path, prog
         progress.progress((i + 1) / len(scene_items))
 
     # 生成されたクリップを全プロンプトに配布（各クリップが隣接セグメントもカバー）
-    if background_videos and all_prompt_numbers:
+    if not skip_spread and background_videos and all_prompt_numbers:
         generated_numbers = sorted(background_videos.keys())
         spread_videos = {}
         for pn in all_prompt_numbers:
@@ -2530,8 +2662,12 @@ def _generate_ai_videos(script, prompts, video_dir: Path, output_dir: Path, prog
     return background_videos
 
 
-def _download_stock_videos(script, prompts, video_dir: Path, output_dir: Path, progress, status) -> dict:
-    """ストック素材（Pexels/Pixabay）による背景動画ダウンロード"""
+def _download_stock_videos(script, prompts, video_dir: Path, output_dir: Path, progress, status, target_numbers: list[int] | None = None) -> dict:
+    """ストック素材（Pexels/Pixabay）による背景動画ダウンロード
+
+    Args:
+        target_numbers: 指定時はそのセグメント番号のみダウンロード（ハイブリッド用）
+    """
     import re as _re
 
     background_videos = {}
@@ -2593,6 +2729,16 @@ def _download_stock_videos(script, prompts, video_dir: Path, output_dir: Path, p
         search_items = [(i + 1, _to_english_query(line.text)) for i, line in enumerate(selected)]
     else:
         search_items = [(1, "abstract background")]
+
+    # ハイブリッドモード: 指定セグメントのみをダウンロード対象にする
+    if target_numbers is not None:
+        target_set = set(target_numbers)
+        search_items = [(num, q) for num, q in search_items if num in target_set]
+        # target_numbersにあるがsearch_itemsにないセグメントも補完
+        existing_nums = {num for num, _ in search_items}
+        for tn in target_numbers:
+            if tn not in existing_nums:
+                search_items.append((tn, "abstract background motion"))
 
     for i, (number, search_query) in enumerate(search_items):
         try:
@@ -2935,7 +3081,7 @@ def run_step_timeline(script, prompts, mode: str, output_formats: list, output_d
     return {"success": True, "files": {}, "error": None}
 
 
-def run_generation(script, prompts, mode: str, output_formats: list, generate_audio: bool = True, generate_images: bool = True, generate_bgm: bool = False, generate_bg_video: bool = False, use_ai_bg: bool = False, ai_duration: int = 8, ai_max_clips: int = 10) -> None:
+def run_generation(script, prompts, mode: str, output_formats: list, generate_audio: bool = True, generate_images: bool = True, generate_bgm: bool = False, generate_bg_video: bool = False, use_ai_bg: bool = False, ai_duration: int = 8, ai_max_clips: int = 10, speed_factor: float = 1.0, number_of_videos: int = 1, hybrid: bool = False) -> None:
     """生成処理を実行（全ステップを順番に実行するラッパー）
 
     Args:
@@ -2946,6 +3092,9 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
         use_ai_bg: 背景動画にAI生成を使用するかどうか
         ai_duration: AI動画のクリップ長（秒）
         ai_max_clips: AI動画の最大クリップ数
+        speed_factor: 再生速度倍率（0.25-1.0）
+        number_of_videos: 同時生成数（1-4）
+        hybrid: ハイブリッドモード（AI+ストック）を使用するかどうか
     """
     # デバッグ: 選択されたモードを表示
     materials_info = []
@@ -3030,7 +3179,11 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
         # STEP 3: 背景動画
         bg_result = {"files": {"videos": {}}}
         if generate_bg_video:
-            bg_result = run_step_bg_video(script, prompts, output_dir, history_entry, use_ai=use_ai_bg, ai_duration=ai_duration, ai_max_clips=ai_max_clips)
+            bg_result = run_step_bg_video(
+                script, prompts, output_dir, history_entry,
+                use_ai=use_ai_bg, ai_duration=ai_duration, ai_max_clips=ai_max_clips,
+                speed_factor=speed_factor, number_of_videos=number_of_videos, hybrid=hybrid,
+            )
         else:
             st.info("⏭️ 背景動画の取得をスキップしました")
         overall_progress.progress(0.5)

@@ -25,6 +25,7 @@ POLL_TIMEOUT = 360  # 最大6分
 SUPPORTED_DURATIONS = (5, 6, 7, 8)
 DEFAULT_DURATION = 8
 DEFAULT_MAX_CLIPS = 10
+DEFAULT_NUMBER_OF_VIDEOS = 1
 
 
 class AIVideoGenerator:
@@ -112,6 +113,18 @@ class AIVideoGenerator:
         """設定ファイルからデフォルトの最大クリップ数を取得"""
         ai_settings = self._settings.get("ai_video", {})
         return ai_settings.get("max_clips", DEFAULT_MAX_CLIPS)
+
+    @property
+    def default_speed_factor(self) -> float:
+        """設定ファイルからデフォルトの再生速度倍率を取得"""
+        ai_settings = self._settings.get("ai_video", {})
+        return float(ai_settings.get("speed_factor", 1.0))
+
+    @property
+    def default_number_of_videos(self) -> int:
+        """設定ファイルからデフォルトの同時生成数を取得"""
+        ai_settings = self._settings.get("ai_video", {})
+        return ai_settings.get("number_of_videos", DEFAULT_NUMBER_OF_VIDEOS)
 
     def generate(
         self,
@@ -219,5 +232,134 @@ class AIVideoGenerator:
             raise
         except Exception as e:
             error_msg = f"Veo 動画生成に失敗: {e}"
+            logger.error(error_msg)
+            raise AIVideoGenerationError(error_msg, original_error=e)
+
+    def generate_multiple(
+        self,
+        prompt: str,
+        output_dir: str | Path,
+        base_filename: str,
+        duration_seconds: int | None = None,
+        number_of_videos: int = DEFAULT_NUMBER_OF_VIDEOS,
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> list[Path]:
+        """Veo APIで複数動画を同時生成
+
+        Args:
+            prompt: 英語の動画生成プロンプト
+            output_dir: 出力ディレクトリパス
+            base_filename: ベースファイル名（拡張子なし）
+            duration_seconds: クリップ長（5-8秒）。None の場合は設定値を使用
+            number_of_videos: 同時生成する動画数（1-4）
+            progress_callback: 進捗コールバック（Streamlit UI用）
+
+        Returns:
+            生成された動画ファイルパスのリスト
+
+        Raises:
+            AIVideoGenerationError: 動画生成に失敗した場合
+            ConfigurationError: APIキーが設定されていない場合
+        """
+        if duration_seconds is None:
+            duration_seconds = self.default_duration
+        if duration_seconds not in SUPPORTED_DURATIONS:
+            raise AIVideoGenerationError(
+                f"サポートされていないクリップ長: {duration_seconds}秒 "
+                f"（対応: {SUPPORTED_DURATIONS}）"
+            )
+        number_of_videos = max(1, min(4, number_of_videos))
+        return self._generate_multiple_with_retry(
+            prompt, output_dir, base_filename, duration_seconds,
+            number_of_videos, progress_callback,
+        )
+
+    @with_retry(max_retries=MAX_RETRIES, base_delay=BASE_DELAY)
+    def _generate_multiple_with_retry(
+        self,
+        prompt: str,
+        output_dir: str | Path,
+        base_filename: str,
+        duration_seconds: int = DEFAULT_DURATION,
+        number_of_videos: int = DEFAULT_NUMBER_OF_VIDEOS,
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> list[Path]:
+        """リトライ付き複数動画生成（内部メソッド）"""
+        try:
+            client = self._get_client()
+            from google.genai import types
+
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            logger.info(
+                "Veo 複数動画生成開始: prompt_length=%d, duration=%ds, number=%d",
+                len(prompt), duration_seconds, number_of_videos,
+            )
+            if progress_callback:
+                progress_callback(
+                    f"🎬 Veo API に動画生成をリクエスト中"
+                    f"（{duration_seconds}秒×{number_of_videos}本）..."
+                )
+
+            operation = client.models.generate_videos(
+                model="veo-2.0-generate-001",
+                prompt=prompt,
+                config=types.GenerateVideosConfig(
+                    person_generation="allow_all",
+                    aspect_ratio="16:9",
+                    number_of_videos=number_of_videos,
+                    duration_seconds=duration_seconds,
+                ),
+            )
+
+            elapsed = 0
+            while not operation.done:
+                if elapsed >= POLL_TIMEOUT:
+                    raise AIVideoGenerationError(
+                        f"動画生成がタイムアウトしました（{POLL_TIMEOUT}秒）"
+                    )
+                if progress_callback:
+                    progress_callback(f"⏳ 動画生成中... ({elapsed}秒経過)")
+                time.sleep(POLL_INTERVAL)
+                elapsed += POLL_INTERVAL
+                operation = client.operations.get(operation)
+
+            logger.info("Veo 複数動画生成完了: %d秒", elapsed)
+
+            if not operation.response or not operation.response.generated_videos:
+                raise AIVideoGenerationError("Veo APIから動画データが返されませんでした")
+
+            # 各動画を a, b, c, ... のサフィックスで保存
+            saved_paths: list[Path] = []
+            for vi, generated_video in enumerate(operation.response.generated_videos):
+                if not generated_video.video or not generated_video.video.uri:
+                    logger.warning("動画 %d にURIが含まれていません、スキップします", vi)
+                    continue
+
+                suffix = chr(ord("a") + vi)
+                output_path = output_dir / f"{base_filename}_{suffix}.mp4"
+
+                if progress_callback:
+                    progress_callback(f"💾 動画 {suffix} を保存中...")
+
+                video_data = client.files.download(file=generated_video.video)
+                with open(output_path, "wb") as f:
+                    f.write(video_data)
+
+                saved_paths.append(output_path)
+                logger.info("Veo 動画保存完了: %s", output_path)
+
+            if not saved_paths:
+                raise AIVideoGenerationError("保存可能な動画が1つもありませんでした")
+
+            return saved_paths
+
+        except ConfigurationError:
+            raise
+        except AIVideoGenerationError:
+            raise
+        except Exception as e:
+            error_msg = f"Veo 複数動画生成に失敗: {e}"
             logger.error(error_msg)
             raise AIVideoGenerationError(error_msg, original_error=e)
