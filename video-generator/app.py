@@ -285,9 +285,18 @@ def generate_image_prompts_from_script(script, num_images: int):
     return ImagePromptList(filename="auto_generated", prompts=prompts)
 
 
+def is_streamlit_cloud() -> bool:
+    """Streamlit Community Cloud上で動作しているかを判定"""
+    return os.environ.get("STREAMLIT_SHARING_MODE") == "streamlit-cloud" or os.path.exists("/mount/src")
+
+
 def get_default_output_folder() -> str:
     """OSに応じたデフォルト出力フォルダを取得"""
     import platform
+
+    # Streamlit Cloud環境では相対パスを使用（ファイルはブラウザ経由でダウンロード）
+    if is_streamlit_cloud():
+        return "output"
 
     # Docker環境かどうかを検出
     is_docker = os.path.exists("/.dockerenv") or os.environ.get("DOCKER_CONTAINER", False)
@@ -1531,47 +1540,47 @@ def main_page() -> None:
             settings = load_settings()
             default_output = settings.get("defaults", {}).get("output_folder", "output")
 
-            # ホームディレクトリとよく使うパスを取得
-            home_dir = os.path.expanduser("~")
-
-            # OS別のデフォルトフォルダを取得
-            default_local_folder = get_default_output_folder()
-
-            preset_paths = {
-                "推奨（ローカル保存）": default_local_folder,
-                "ドキュメント": os.path.join(home_dir, "Documents"),
-                "デスクトップ": os.path.join(home_dir, "Desktop"),
-                "ダウンロード": os.path.join(home_dir, "Downloads"),
-                "ホーム": home_dir,
-                "相対パス (output)": "output",
-                "カスタム入力": "_custom_",
-            }
-
-            # プリセット選択（推奨をデフォルトに）
-            selected_preset = st.selectbox(
-                "出力先を選択",
-                options=list(preset_paths.keys()),
-                index=0,  # 「推奨（ローカル保存）」がデフォルト
-                key="output_preset_select",
-            )
-
-            if selected_preset == "カスタム入力":
-                # カスタムパス入力
-                custom_output = st.text_input(
-                    "カスタムパスを入力",
-                    value=st.session_state.get("custom_output_folder", default_output),
-                    help="絶対パスまたは相対パスで指定できます。"
-                )
+            if is_streamlit_cloud():
+                # Streamlit Cloud: 出力先は固定、ブラウザダウンロードを案内
+                custom_output = "output"
+                st.session_state.custom_output_folder = custom_output
+                st.info("☁️ クラウド環境で動作中です。生成したファイルはSTEP 5の「ダウンロード」ボタンからPCに保存できます。")
             else:
-                custom_output = preset_paths[selected_preset]
+                # ローカル環境: 出力先を選択可能
+                home_dir = os.path.expanduser("~")
+                default_local_folder = get_default_output_folder()
 
-            st.session_state.custom_output_folder = custom_output
+                preset_paths = {
+                    "推奨（ローカル保存）": default_local_folder,
+                    "ドキュメント": os.path.join(home_dir, "Documents"),
+                    "デスクトップ": os.path.join(home_dir, "Desktop"),
+                    "ダウンロード": os.path.join(home_dir, "Downloads"),
+                    "ホーム": home_dir,
+                    "相対パス (output)": "output",
+                    "カスタム入力": "_custom_",
+                }
 
-            st.info(f"📂 現在の出力先: `{custom_output}/[タイムスタンプ]/`")
+                selected_preset = st.selectbox(
+                    "出力先を選択",
+                    options=list(preset_paths.keys()),
+                    index=0,
+                    key="output_preset_select",
+                )
 
-            # フォルダが存在するか確認
-            if os.path.isabs(custom_output) and not os.path.exists(custom_output):
-                st.warning(f"⚠️ フォルダが存在しません。生成時に自動作成されます。")
+                if selected_preset == "カスタム入力":
+                    custom_output = st.text_input(
+                        "カスタムパスを入力",
+                        value=st.session_state.get("custom_output_folder", default_output),
+                        help="絶対パスまたは相対パスで指定できます。"
+                    )
+                else:
+                    custom_output = preset_paths[selected_preset]
+
+                st.session_state.custom_output_folder = custom_output
+                st.info(f"📂 現在の出力先: `{custom_output}/[タイムスタンプ]/`")
+
+                if os.path.isabs(custom_output) and not os.path.exists(custom_output):
+                    st.warning(f"⚠️ フォルダが存在しません。生成時に自動作成されます。")
 
         st.divider()
 
@@ -3352,50 +3361,50 @@ def settings_page() -> None:
         )
 
         st.subheader("出力フォルダ")
-        st.info("💡 このPCで使用するデフォルトの出力先を選択してください。「推奨」を選ぶとローカルに保存されます。")
 
-        # ユーザーのホームディレクトリを取得
-        home_dir = os.path.expanduser("~")
-
-        # OS別のデフォルトフォルダを取得
-        default_local_folder = get_default_output_folder()
-
-        # プリセットオプション（推奨をトップに）
-        preset_paths = {
-            "推奨（ローカル保存）": default_local_folder,
-            "ドキュメント": os.path.join(home_dir, "Documents"),
-            "デスクトップ": os.path.join(home_dir, "Desktop"),
-            "ダウンロード": os.path.join(home_dir, "Downloads"),
-            "ホーム": home_dir,
-            "相対パス (output)": "output",
-            "カスタム入力": "_custom_",
-        }
-
-        # 現在の設定値からプリセットを判定
-        current_folder = defaults.get("output_folder", "output")
-        current_preset = "カスタム入力"
-        for name, path in preset_paths.items():
-            if path == current_folder:
-                current_preset = name
-                break
-
-        preset_options = list(preset_paths.keys())
-        selected_preset = st.selectbox(
-            "出力先を選択",
-            options=preset_options,
-            index=preset_options.index(current_preset) if current_preset in preset_options else 0,
-            key="settings_output_preset",
-        )
-
-        if selected_preset == "カスタム入力":
-            output_folder = st.text_input(
-                "カスタムパスを入力",
-                value=current_folder if current_folder not in preset_paths.values() else "",
-                key="settings_custom_output",
-            )
+        if is_streamlit_cloud():
+            output_folder = "output"
+            st.info("☁️ クラウド環境で動作中です。生成したファイルはメインページのSTEP 5「ダウンロード」ボタンからPCに保存できます。")
         else:
-            output_folder = preset_paths[selected_preset]
-            st.text(f"📁 {output_folder}")
+            st.info("💡 このPCで使用するデフォルトの出力先を選択してください。「推奨」を選ぶとローカルに保存されます。")
+
+            home_dir = os.path.expanduser("~")
+            default_local_folder = get_default_output_folder()
+
+            preset_paths = {
+                "推奨（ローカル保存）": default_local_folder,
+                "ドキュメント": os.path.join(home_dir, "Documents"),
+                "デスクトップ": os.path.join(home_dir, "Desktop"),
+                "ダウンロード": os.path.join(home_dir, "Downloads"),
+                "ホーム": home_dir,
+                "相対パス (output)": "output",
+                "カスタム入力": "_custom_",
+            }
+
+            current_folder = defaults.get("output_folder", "output")
+            current_preset = "カスタム入力"
+            for name, path in preset_paths.items():
+                if path == current_folder:
+                    current_preset = name
+                    break
+
+            preset_options = list(preset_paths.keys())
+            selected_preset = st.selectbox(
+                "出力先を選択",
+                options=preset_options,
+                index=preset_options.index(current_preset) if current_preset in preset_options else 0,
+                key="settings_output_preset",
+            )
+
+            if selected_preset == "カスタム入力":
+                output_folder = st.text_input(
+                    "カスタムパスを入力",
+                    value=current_folder if current_folder not in preset_paths.values() else "",
+                    key="settings_custom_output",
+                )
+            else:
+                output_folder = preset_paths[selected_preset]
+                st.text(f"📁 {output_folder}")
 
     with tab4:
         st.header("解説者イラスト設定")
