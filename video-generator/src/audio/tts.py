@@ -235,6 +235,7 @@ class TTSClient:
                                 ),
                             ),
                         ),
+                        http_options=types.HttpOptions(timeout=120_000),
                     )
                     logger.info("Gemini TTS 使用モデル: %s", model_name)
                     break
@@ -243,6 +244,9 @@ class TTSClient:
                     error_str = str(model_error)
                     if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
                         logger.warning("モデル %s のクォータ超過、次のモデルを試行", model_name)
+                        continue
+                    if "timeout" in error_str.lower() or "timed out" in error_str.lower():
+                        logger.warning("モデル %s タイムアウト、次のモデルを試行", model_name)
                         continue
                     raise
             else:
@@ -261,6 +265,13 @@ class TTSClient:
                 raise TTSError("Gemini TTS: 音声データがありません")
 
             audio_data = response.candidates[0].content.parts[0].inline_data.data
+
+            # 音声データの整合性チェック（最低0.1秒分: 24000Hz * 2bytes * 0.1s = 4800bytes）
+            MIN_AUDIO_SIZE = 4800
+            if not audio_data or len(audio_data) < MIN_AUDIO_SIZE:
+                logger.warning("Gemini TTS: 音声データが不完全です（%d bytes）", len(audio_data) if audio_data else 0)
+                raise TTSError("Gemini TTS: 音声データが不完全です（データサイズ不足）", is_quota_error=True)
+
             wav_path = output_path.with_suffix(".wav")
 
             with wave.open(str(wav_path), "wb") as wf:
@@ -274,6 +285,10 @@ class TTSClient:
 
         except Exception as e:
             error_msg = str(e)
+            # タイムアウトエラーの場合はリトライ可能として扱う
+            if "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
+                logger.warning("Gemini TTS タイムアウト: リトライ可能なエラーとして処理")
+                raise TTSError(f"Gemini TTS タイムアウト: {e}", original_error=e, is_quota_error=True)
             # クォータ超過エラー(429)の場合は特別に処理
             if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg or "quota" in error_msg.lower():
                 logger.warning("Gemini TTS クォータ超過: Google Cloud TTSにフォールバック")
