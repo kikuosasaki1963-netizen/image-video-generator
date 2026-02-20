@@ -489,45 +489,83 @@ def load_existing_materials(folder_path_or_name: str) -> dict:
 
 
 def get_history_file_path() -> Path:
-    """履歴ファイルのパスを取得"""
-    # セッション状態のカスタム出力先を優先
-    if "custom_output_folder" in st.session_state and st.session_state.custom_output_folder:
-        output_folder = st.session_state.custom_output_folder
+    """履歴ファイルのパスを取得
+
+    履歴はアプリのデータディレクトリに固定保存する。
+    出力先フォルダに依存すると、セッション切れやパス変更で履歴が見つからなくなるため。
+    """
+    if is_streamlit_cloud():
+        # Streamlit Cloud: /mount/src配下の永続ディレクトリを使用
+        history_dir = Path("/mount/src") / ".app_data"
+        # /mount/srcが存在しない場合はアプリルートにフォールバック
+        if not Path("/mount/src").exists():
+            history_dir = Path.cwd() / ".app_data"
     else:
-        settings = load_settings()
-        configured_folder = settings.get("defaults", {}).get("output_folder", "")
-        # 設定が "output"（相対パス）または空の場合は、OS別デフォルトを使用
-        if not configured_folder or configured_folder == "output":
-            output_folder = get_default_output_folder()
+        # ローカル: 出力フォルダに保存（従来互換）
+        if "custom_output_folder" in st.session_state and st.session_state.custom_output_folder:
+            output_folder = st.session_state.custom_output_folder
         else:
-            output_folder = configured_folder
+            settings = load_settings()
+            configured_folder = settings.get("defaults", {}).get("output_folder", "")
+            if not configured_folder or configured_folder == "output":
+                output_folder = get_default_output_folder()
+            else:
+                output_folder = configured_folder
+        history_dir = Path(output_folder)
 
-    history_path = Path(output_folder) / "generation_history.json"
-
-    # 親ディレクトリが存在しない場合は作成
+    history_path = history_dir / "generation_history.json"
     history_path.parent.mkdir(parents=True, exist_ok=True)
-
     return history_path
 
 
 def load_generation_history() -> list[dict]:
-    """生成履歴を読み込む"""
+    """生成履歴を読み込む
+
+    ファイルとセッションステートの両方から読み込み、
+    セッション中にファイルが消えても履歴を維持する。
+    """
+    # ファイルから読み込み
     history_file = get_history_file_path()
+    file_history: list[dict] = []
     if history_file.exists():
         try:
             with open(history_file, encoding="utf-8") as f:
-                return json.load(f)
+                file_history = json.load(f)
         except (json.JSONDecodeError, IOError):
-            return []
+            file_history = []
+
+    # セッションステートのキャッシュと統合
+    session_history: list[dict] = st.session_state.get("_history_cache", [])
+
+    if file_history:
+        # ファイルの履歴をセッションにキャッシュ
+        st.session_state._history_cache = file_history
+        return file_history
+    elif session_history:
+        # ファイルが消えた場合（リブート等）はセッションキャッシュを使用し、ファイルも復元
+        try:
+            history_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(history_file, "w", encoding="utf-8") as f:
+                json.dump(session_history, f, ensure_ascii=False, indent=2)
+        except (IOError, OSError):
+            pass
+        return session_history
     return []
 
 
 def save_generation_history(history: list[dict]) -> None:
-    """生成履歴を保存"""
+    """生成履歴を保存（ファイル + セッションステート）"""
+    # セッションステートにもキャッシュ
+    st.session_state._history_cache = history
+
+    # ファイルに保存
     history_file = get_history_file_path()
-    history_file.parent.mkdir(parents=True, exist_ok=True)
-    with open(history_file, "w", encoding="utf-8") as f:
-        json.dump(history, f, ensure_ascii=False, indent=2)
+    try:
+        history_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(history_file, "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False, indent=2)
+    except (IOError, OSError) as e:
+        print(f"履歴ファイルの保存に失敗: {e}")
 
 
 def log_error_to_file(output_dir: Path | str, error_type: str, error_message: str, details: str = "") -> None:
