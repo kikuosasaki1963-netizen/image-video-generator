@@ -78,6 +78,13 @@ class ConfigurationError(VideoGeneratorError):
         super().__init__(message)
 
 
+class DriveUploadError(APIError):
+    """Google Drive アップロードエラー"""
+
+    def __init__(self, message: str, original_error: Exception | None = None) -> None:
+        super().__init__(message, "Google Drive", original_error)
+
+
 class RateLimitError(APIError):
     """レート制限エラー"""
 

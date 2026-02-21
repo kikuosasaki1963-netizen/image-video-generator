@@ -2080,6 +2080,45 @@ def _create_split_zips(files: list[Path], base_dir: Path, downloads_dir: Path, p
     return zip_paths
 
 
+def _render_drive_upload(output_dir: Path) -> None:
+    """Google Drive アップロードUI"""
+    st.markdown("### 📤 Google Driveにアップロード")
+
+    # アップロード済みリンクがあれば表示
+    drive_link = st.session_state.get("drive_upload_link")
+    if drive_link:
+        st.success("アップロード完了！")
+        st.markdown(f"[Google Driveで開く]({drive_link})")
+
+    if st.button("📤 Google Driveにアップロード", key="drive_upload_btn"):
+        progress_placeholder = st.empty()
+        status_placeholder = st.empty()
+
+        def on_progress(current: int, total: int, filename: str) -> None:
+            progress_placeholder.progress(
+                current / total,
+                text=f"{current}/{total} ファイルアップロード中... ({filename})",
+            )
+
+        try:
+            from src.drive.uploader import DriveUploader
+
+            uploader = DriveUploader(progress_callback=on_progress)
+            folder_name = f"video_output_{output_dir.name}"
+
+            status_placeholder.info("Google Drive に接続中...")
+            link = uploader.upload_folder(output_dir, folder_name)
+
+            progress_placeholder.empty()
+            status_placeholder.empty()
+
+            st.session_state["drive_upload_link"] = link
+            st.rerun()
+        except Exception as e:
+            progress_placeholder.empty()
+            status_placeholder.error(f"アップロードに失敗しました: {e}")
+
+
 _fragment = getattr(st, "fragment", None)
 
 
@@ -2128,6 +2167,11 @@ def render_download_section(output_dir: Path) -> None:
         st.metric("🎵 BGM", f"{len([f for f in bgm_files if f.is_file()])}件")
     with col4:
         st.metric("🎬 素材動画", f"{len(bg_videos)}本")
+
+    # Google Drive アップロード
+    _render_drive_upload(output_dir)
+
+    st.divider()
 
     # カテゴリ別ZIPダウンロード
     categories = [
