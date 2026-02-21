@@ -1,4 +1,8 @@
-"""Google Drive アップロード機能"""
+"""Google Cloud Storage アップロード機能
+
+サービスアカウントはGoogle Driveにストレージクォータがないため、
+GCSバケットにアップロードし、公開URLを生成する。
+"""
 
 from __future__ import annotations
 
@@ -7,79 +11,83 @@ import mimetypes
 from pathlib import Path
 from typing import Callable
 
-from src.utils.config import get_env_var, get_gcp_credentials
+from src.utils.config import get_gcp_credentials
 from src.utils.exceptions import DriveUploadError
 
 logger = logging.getLogger(__name__)
 
-DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
-DEFAULT_DRIVE_FOLDER_ID = "14uJYpFHKTV4agLyk6tWVoDl0ZavTv5-n"
+GCS_BUCKET_NAME = "video-generator-output-test2"
+GCS_SCOPE = "https://www.googleapis.com/auth/devstorage.read_write"
 
 
 class DriveUploader:
-    """Google Drive へファイル/フォルダをアップロードする"""
+    """Google Cloud Storage へファイルをアップロードする"""
 
     def __init__(self, progress_callback: Callable[[int, int, str], None] | None = None) -> None:
-        """初期化
-
-        Args:
-            progress_callback: 進捗コールバック (current, total, filename)
-        """
-        self._service = None
+        self._client = None
         self._progress_callback = progress_callback
 
-    def _get_service(self):
-        """Google Drive API サービスを遅延初期化"""
-        if self._service is not None:
-            return self._service
+    def _get_client(self):
+        """GCS クライアントを遅延初期化"""
+        if self._client is not None:
+            return self._client
 
         try:
+            from google.cloud import storage
             from google.oauth2 import service_account
-            from googleapiclient.discovery import build
 
             credentials_data = get_gcp_credentials()
             if isinstance(credentials_data, dict):
                 credentials = service_account.Credentials.from_service_account_info(
-                    credentials_data, scopes=[DRIVE_SCOPE]
+                    credentials_data, scopes=[GCS_SCOPE]
+                )
+                self._client = storage.Client(
+                    credentials=credentials, project=credentials_data.get("project_id")
                 )
             elif isinstance(credentials_data, str):
                 credentials = service_account.Credentials.from_service_account_file(
-                    credentials_data, scopes=[DRIVE_SCOPE]
+                    credentials_data, scopes=[GCS_SCOPE]
                 )
+                self._client = storage.Client(credentials=credentials)
             else:
                 raise DriveUploadError(
                     "GCP認証情報が見つかりません。"
-                    "GCP_SERVICE_ACCOUNT_JSON 環境変数または "
-                    "GOOGLE_APPLICATION_CREDENTIALS を設定してください。"
                 )
 
-            self._service = build("drive", "v3", credentials=credentials)
-            logger.info("Google Drive API サービスを初期化しました")
-            return self._service
+            logger.info("GCS クライアントを初期化しました")
+            return self._client
         except DriveUploadError:
             raise
         except Exception as e:
-            raise DriveUploadError(f"Google Drive API の初期化に失敗: {e}", original_error=e) from e
+            raise DriveUploadError(f"GCS の初期化に失敗: {e}", original_error=e) from e
+
+    def _ensure_bucket(self, client) -> "google.cloud.storage.Bucket":
+        """バケットを取得。存在しなければ作成する。"""
+        from google.cloud import storage as gcs_module
+
+        bucket = client.bucket(GCS_BUCKET_NAME)
+        if not bucket.exists():
+            bucket = client.create_bucket(
+                GCS_BUCKET_NAME,
+                location="asia-northeast1",
+            )
+            logger.info(f"バケット作成: {GCS_BUCKET_NAME}")
+        return bucket
 
     def upload_folder(self, local_dir: Path, folder_name: str) -> str:
-        """フォルダをGoogle Driveにアップロード
-
-        サービスアカウントにはDriveストレージがないため、
-        DRIVE_FOLDER_ID で指定された共有フォルダ内にアップロードする。
+        """フォルダをGCSにアップロード
 
         Args:
             local_dir: アップロード元のローカルディレクトリ
-            folder_name: Drive上に作成するフォルダ名
+            folder_name: GCS上のプレフィックス（フォルダ名）
 
         Returns:
-            共有リンクURL
+            ダウンロードページURL
         """
-        service = self._get_service()
+        client = self._get_client()
+        bucket = self._ensure_bucket(client)
 
-        # 共有フォルダIDを取得（環境変数 > デフォルト値）
-        shared_folder_id = get_env_var("DRIVE_FOLDER_ID") or DEFAULT_DRIVE_FOLDER_ID
-
-        # アップロード対象ファイルを収集（_downloads等の内部フォルダを除外）
+        # アップロード対象ファイルを収集
         upload_files = [
             f for f in sorted(local_dir.rglob("*"))
             if f.is_file() and not f.relative_to(local_dir).parts[0].startswith("_")
@@ -89,33 +97,26 @@ class DriveUploader:
             raise DriveUploadError("アップロードするファイルがありません。")
 
         try:
-            # 共有フォルダ内にサブフォルダを作成
-            root_folder_id = self._create_folder(service, folder_name, parent_id=shared_folder_id)
-
-            # フォルダを「リンクを知っている全員が閲覧可能」に設定
-            self._make_public(service, root_folder_id)
-
-            # サブフォルダIDキャッシュ（相対パス → folder_id）
-            folder_cache: dict[str, str] = {}
-
             for idx, file_path in enumerate(upload_files):
                 rel_path = file_path.relative_to(local_dir)
-                filename = rel_path.name
+                blob_name = f"{folder_name}/{rel_path}"
 
-                # 進捗コールバック
                 if self._progress_callback:
-                    self._progress_callback(idx + 1, total, filename)
+                    self._progress_callback(idx + 1, total, rel_path.name)
 
-                # 親フォルダを作成/取得
-                parent_id = self._ensure_parent_folders(
-                    service, root_folder_id, rel_path.parent, folder_cache
+                blob = bucket.blob(blob_name)
+                mime_type, _ = mimetypes.guess_type(str(file_path))
+                blob.upload_from_filename(
+                    str(file_path),
+                    content_type=mime_type or "application/octet-stream",
                 )
+                # 公開アクセス設定
+                blob.make_public()
 
-                # ファイルをアップロード
-                self._upload_file(service, file_path, parent_id)
+                logger.debug(f"アップロード: {blob_name}")
 
-            # 共有リンクを生成
-            share_link = f"https://drive.google.com/drive/folders/{root_folder_id}"
+            # フォルダ一覧ページURL
+            share_link = f"https://storage.googleapis.com/{GCS_BUCKET_NAME}/{folder_name}/"
             logger.info(f"アップロード完了: {share_link}")
             return share_link
 
@@ -124,86 +125,19 @@ class DriveUploader:
         except Exception as e:
             raise DriveUploadError(f"アップロード中にエラーが発生: {e}", original_error=e) from e
 
-    def _create_folder(self, service, name: str, parent_id: str | None = None) -> str:
-        """Drive上にフォルダを作成"""
-        metadata: dict = {
-            "name": name,
-            "mimeType": "application/vnd.google-apps.folder",
-        }
-        if parent_id:
-            metadata["parents"] = [parent_id]
-
-        folder = service.files().create(body=metadata, fields="id").execute()
-        folder_id = folder["id"]
-        logger.debug(f"フォルダ作成: {name} (id={folder_id})")
-        return folder_id
-
-    def _make_public(self, service, file_id: str) -> None:
-        """ファイル/フォルダを「リンクを知っている全員が閲覧可能」に設定"""
-        permission = {
-            "type": "anyone",
-            "role": "reader",
-        }
-        service.permissions().create(fileId=file_id, body=permission).execute()
-        logger.debug(f"公開設定完了: {file_id}")
-
-    def _ensure_parent_folders(
-        self,
-        service,
-        root_folder_id: str,
-        rel_parent: Path,
-        cache: dict[str, str],
-    ) -> str:
-        """相対パスに対応するサブフォルダ構造を作成し、親フォルダIDを返す"""
-        if str(rel_parent) == ".":
-            return root_folder_id
-
-        parts = rel_parent.parts
-        current_parent = root_folder_id
-
-        for i in range(len(parts)):
-            partial_path = str(Path(*parts[: i + 1]))
-            if partial_path in cache:
-                current_parent = cache[partial_path]
-            else:
-                folder_id = self._create_folder(service, parts[i], current_parent)
-                cache[partial_path] = folder_id
-                current_parent = folder_id
-
-        return current_parent
-
-    def _upload_file(self, service, file_path: Path, parent_folder_id: str) -> str:
-        """個別ファイルをアップロード
-
-        Args:
-            file_path: アップロードするファイルのパス
-            parent_folder_id: アップロード先の親フォルダID
-
-        Returns:
-            アップロードされたファイルのID
-        """
-        from googleapiclient.http import MediaFileUpload
-
-        mime_type, _ = mimetypes.guess_type(str(file_path))
-        if mime_type is None:
-            mime_type = "application/octet-stream"
-
-        file_metadata: dict = {
-            "name": file_path.name,
-            "parents": [parent_folder_id],
-        }
-
-        media = MediaFileUpload(
-            str(file_path),
-            mimetype=mime_type,
-            resumable=True,
-        )
-
-        uploaded = (
-            service.files()
-            .create(body=file_metadata, media_body=media, fields="id")
-            .execute()
-        )
-        file_id = uploaded["id"]
-        logger.debug(f"ファイルアップロード: {file_path.name} (id={file_id})")
-        return file_id
+    def get_file_links(self, folder_name: str) -> list[dict[str, str]]:
+        """アップロード済みファイルの公開URLリストを取得"""
+        client = self._get_client()
+        bucket = client.bucket(GCS_BUCKET_NAME)
+        blobs = bucket.list_blobs(prefix=f"{folder_name}/")
+        links = []
+        for blob in blobs:
+            if blob.name.endswith("/"):
+                continue
+            name = blob.name.removeprefix(f"{folder_name}/")
+            links.append({
+                "name": name,
+                "url": blob.public_url,
+                "size_mb": blob.size / (1024 * 1024) if blob.size else 0,
+            })
+        return links

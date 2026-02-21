@@ -2081,16 +2081,18 @@ def _create_split_zips(files: list[Path], base_dir: Path, downloads_dir: Path, p
 
 
 def _render_drive_upload(output_dir: Path) -> None:
-    """Google Drive アップロードUI"""
-    st.markdown("### 📤 Google Driveにアップロード")
+    """クラウドストレージアップロードUI"""
+    st.markdown("### 📤 クラウドにアップロード")
 
     # アップロード済みリンクがあれば表示
-    drive_link = st.session_state.get("drive_upload_link")
-    if drive_link:
-        st.success("アップロード完了！")
-        st.markdown(f"[Google Driveで開く]({drive_link})")
+    upload_links = st.session_state.get("cloud_upload_links")
+    if upload_links:
+        st.success(f"アップロード完了！ ({len(upload_links)}ファイル)")
+        for item in upload_links:
+            size_str = f" ({item['size_mb']:.0f}MB)" if item["size_mb"] > 1 else ""
+            st.markdown(f"- [{item['name']}]({item['url']}){size_str}")
 
-    if st.button("📤 Google Driveにアップロード", key="drive_upload_btn"):
+    if st.button("📤 クラウドにアップロード", key="drive_upload_btn"):
         progress_placeholder = st.empty()
         status_placeholder = st.empty()
 
@@ -2106,13 +2108,16 @@ def _render_drive_upload(output_dir: Path) -> None:
             uploader = DriveUploader(progress_callback=on_progress)
             folder_name = f"video_output_{output_dir.name}"
 
-            status_placeholder.info("Google Drive に接続中...")
-            link = uploader.upload_folder(output_dir, folder_name)
+            status_placeholder.info("Google Cloud Storage に接続中...")
+            uploader.upload_folder(output_dir, folder_name)
+
+            # ファイルリンク一覧を取得
+            links = uploader.get_file_links(folder_name)
 
             progress_placeholder.empty()
             status_placeholder.empty()
 
-            st.session_state["drive_upload_link"] = link
+            st.session_state["cloud_upload_links"] = links
             st.rerun()
         except Exception as e:
             progress_placeholder.empty()

@@ -5,8 +5,8 @@ streamlit>=1.37.0
 google-genai>=1.0.0
 google-cloud-texttospeech>=2.16.0
 
-# Google Drive API
-google-api-python-client>=2.100.0
+# Google Cloud Storage
+google-cloud-storage>=2.14.0
 
 # BGM Generation
 # beatoven.ai はREST APIを直接使用（公式SDKなし）
