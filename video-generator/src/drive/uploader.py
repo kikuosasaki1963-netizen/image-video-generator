@@ -13,6 +13,7 @@ from src.utils.exceptions import DriveUploadError
 logger = logging.getLogger(__name__)
 
 DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
+DEFAULT_DRIVE_FOLDER_ID = "14uJYpFHKTV4agLyk6tWVoDl0ZavTv5-n"
 
 
 class DriveUploader:
@@ -75,15 +76,8 @@ class DriveUploader:
         """
         service = self._get_service()
 
-        # 共有フォルダIDを取得
-        shared_folder_id = get_env_var("DRIVE_FOLDER_ID")
-        if not shared_folder_id:
-            raise DriveUploadError(
-                "DRIVE_FOLDER_ID が設定されていません。\n"
-                "1. Google Driveでフォルダを作成\n"
-                "2. サービスアカウントに編集者権限で共有\n"
-                "3. DRIVE_FOLDER_ID にフォルダIDを設定してください"
-            )
+        # 共有フォルダIDを取得（環境変数 > デフォルト値）
+        shared_folder_id = get_env_var("DRIVE_FOLDER_ID") or DEFAULT_DRIVE_FOLDER_ID
 
         # アップロード対象ファイルを収集（_downloads等の内部フォルダを除外）
         upload_files = [
