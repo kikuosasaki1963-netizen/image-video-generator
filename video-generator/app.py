@@ -2902,14 +2902,22 @@ def run_step_images(script, prompts, output_dir: Path, history_entry: dict | Non
                 image_dir.mkdir(exist_ok=True)
                 stock_client = StockVideoClient()
 
+                import time as _time
+                WAIT_BETWEEN_IMAGES = 15.0  # レート制限対策（実効2-5 RPM）
+
                 image_errors = []
                 for i, p in enumerate(missing_prompts):
                     try:
-                        status.text(f"🖼️ 画像生成中: {i + 1}/{len(missing_prompts)} - {p.prompt[:30]}...")
+                        remaining_min = (len(missing_prompts) - i) * WAIT_BETWEEN_IMAGES / 60
+                        status.text(f"🖼️ 画像生成中: {i + 1}/{len(missing_prompts)} - {p.prompt[:30]}...（残り約{remaining_min:.0f}分）")
                         output_path = image_dir / f"{p.number:03d}_scene.png"
                         image_gen.generate(p.prompt, output_path)
                         generated_images[p.number] = str(output_path)
                         generated_count += 1
+
+                        # レート制限対策: リクエスト間に待機
+                        if i < len(missing_prompts) - 1:
+                            _time.sleep(WAIT_BETWEEN_IMAGES)
                     except Exception as img_err:
                         log_error_to_file(output_dir, f"画像生成エラー（画像 {p.number}）", str(img_err), traceback.format_exc())
                         image_errors.append(p.number)

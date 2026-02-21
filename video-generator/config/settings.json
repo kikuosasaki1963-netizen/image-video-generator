@@ -55,7 +55,7 @@
         }
     },
     "image_generation": {
-        "model": "gemini-3-pro-image-preview",
+        "model": "gemini-2.5-flash-image",
         "default_resolution": "1024x1024"
     },
     "stock_video": {

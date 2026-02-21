@@ -318,28 +318,53 @@ class ImageGenerator:
         """
         return self._generate_with_retry(prompt, output_path)
 
+    # 画像生成モデルの優先順位（フォールバック対応）
+    IMAGE_MODELS = ["gemini-2.5-flash-image", "gemini-2.0-flash-exp"]
+
     @with_retry(max_retries=MAX_RETRIES, base_delay=BASE_DELAY)
     def _generate_with_retry(self, prompt: str, output_path: str | Path) -> Path:
         """リトライ付き画像生成（内部メソッド）"""
         try:
             client = self._get_client()
             image_settings = self._settings.get("image_generation", {})
-            model = image_settings.get("model", "gemini-3-pro-image-preview")
+            configured_model = image_settings.get("model", "")
 
-            logger.info("画像生成開始: model=%s, prompt_length=%d", model, len(prompt))
+            # 無料プランで使えるモデルを優先
+            models_to_try = list(self.IMAGE_MODELS)
+            if configured_model and configured_model not in models_to_try:
+                models_to_try.append(configured_model)
 
-            # Gemini 3 Pro Image で画像生成
             from google.genai import types
 
-            response = client.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    image_config=types.ImageConfig(
-                        aspect_ratio="16:9",
+            response = None
+            last_error = None
+            used_model = models_to_try[0]
+
+            for model in models_to_try:
+                try:
+                    logger.info("画像生成開始: model=%s, prompt_length=%d", model, len(prompt))
+                    response = client.models.generate_content(
+                        model=model,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            response_modalities=["IMAGE"],
+                            image_config=types.ImageConfig(
+                                aspect_ratio="16:9",
+                            ),
+                        ),
                     )
-                ),
-            )
+                    used_model = model
+                    break
+                except Exception as model_err:
+                    last_error = model_err
+                    error_str = str(model_err)
+                    if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "not found" in error_str.lower() or "not supported" in error_str.lower():
+                        logger.warning("モデル %s 利用不可、次のモデルを試行: %s", model, error_str[:100])
+                        continue
+                    raise
+
+            if response is None:
+                raise ImageGenerationError(f"全モデルで画像生成に失敗: {last_error}")
 
             output_path = Path(output_path)
             output_path.parent.mkdir(parents=True, exist_ok=True)
