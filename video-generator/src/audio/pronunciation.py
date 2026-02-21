@@ -44,8 +44,12 @@ def check_pronunciation(text: str) -> list[PronunciationSuggestion]:
 
     try:
         import google.genai as genai
+        from google.genai import types as genai_types
 
-        client = genai.Client(api_key=api_key)
+        client = genai.Client(
+            api_key=api_key,
+            http_options=genai_types.HttpOptions(timeout=120_000),
+        )
 
         prompt = f"""以下の日本語テキストを分析し、TTS（テキスト読み上げ）で読み間違えやすい箇所を検出してください。
 

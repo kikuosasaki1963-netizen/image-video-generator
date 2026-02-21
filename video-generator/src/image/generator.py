@@ -65,9 +65,13 @@ class ImageGenerator:
 
             try:
                 import google.genai as genai
+                from google.genai import types as genai_types
 
-                self._client = genai.Client(api_key=api_key)
-                logger.info("Gemini クライアントを初期化しました")
+                self._client = genai.Client(
+                    api_key=api_key,
+                    http_options=genai_types.HttpOptions(timeout=120_000),
+                )
+                logger.info("Gemini クライアントを初期化しました（timeout=120s）")
             except Exception as e:
                 raise ImageGenerationError(
                     f"Gemini クライアントの初期化に失敗: {e}",

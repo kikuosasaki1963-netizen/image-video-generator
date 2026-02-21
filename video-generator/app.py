@@ -176,7 +176,11 @@ def generate_image_prompts_from_script(script, num_images: int):
         try:
             import google.genai as genai
 
-            client = genai.Client(api_key=api_key)
+            from google.genai import types as genai_types
+            client = genai.Client(
+                api_key=api_key,
+                http_options=genai_types.HttpOptions(timeout=120_000),
+            )
 
             # 台本の全テキストを結合
             script_text = "\n".join([
