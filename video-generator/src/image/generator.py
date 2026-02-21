@@ -319,7 +319,7 @@ class ImageGenerator:
         return self._generate_with_retry(prompt, output_path)
 
     # 画像生成モデルの優先順位（フォールバック対応）
-    IMAGE_MODELS = ["gemini-2.5-flash-image", "gemini-2.0-flash-exp"]
+    IMAGE_MODELS = ["gemini-3-pro-image-preview", "gemini-2.5-flash-image"]
 
     @with_retry(max_retries=MAX_RETRIES, base_delay=BASE_DELAY)
     def _generate_with_retry(self, prompt: str, output_path: str | Path) -> Path:
