@@ -61,19 +61,6 @@ class DriveUploader:
         except Exception as e:
             raise DriveUploadError(f"GCS の初期化に失敗: {e}", original_error=e) from e
 
-    def _ensure_bucket(self, client) -> "google.cloud.storage.Bucket":
-        """バケットを取得。存在しなければ作成する。"""
-        from google.cloud import storage as gcs_module
-
-        bucket = client.bucket(GCS_BUCKET_NAME)
-        if not bucket.exists():
-            bucket = client.create_bucket(
-                GCS_BUCKET_NAME,
-                location="asia-northeast1",
-            )
-            logger.info(f"バケット作成: {GCS_BUCKET_NAME}")
-        return bucket
-
     def upload_folder(self, local_dir: Path, folder_name: str) -> str:
         """フォルダをGCSにアップロード
 
@@ -85,7 +72,7 @@ class DriveUploader:
             ダウンロードページURL
         """
         client = self._get_client()
-        bucket = self._ensure_bucket(client)
+        bucket = client.bucket(GCS_BUCKET_NAME)
 
         # アップロード対象ファイルを収集
         upload_files = [
