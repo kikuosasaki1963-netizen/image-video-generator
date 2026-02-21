@@ -2097,7 +2097,7 @@ def render_download_section(output_dir: Path) -> None:
     final_videos = [f for f in videos_dir.glob("*.mp4") if f.is_file()] if videos_dir.exists() else []
     bg_videos = list((videos_dir / "backgrounds").rglob("*.mp4")) if (videos_dir / "backgrounds").exists() else []
 
-    # 完成動画がある場合は目立たせて表示
+    # 完成動画がある場合は目立たせて表示（メモリ節約: 1つずつ準備）
     if final_videos:
         st.markdown("### 🎬 完成動画")
         for fv in final_videos:
@@ -2106,10 +2106,13 @@ def render_download_section(output_dir: Path) -> None:
             with fcol1:
                 st.markdown(f"**{fv.name}** ({fv_size_mb:.0f}MB)")
             with fcol2:
-                with open(fv, "rb") as vf:
+                ready_key = f"ready_final_{fv.name}"
+                if st.button("📦 準備", key=f"prep_final_{fv.name}"):
+                    st.session_state[ready_key] = True
+                if st.session_state.get(ready_key) and fv.exists():
                     st.download_button(
                         label="📥 ダウンロード",
-                        data=vf,
+                        data=fv.read_bytes(),
                         file_name=fv.name,
                         mime="video/mp4",
                         key=f"dl_final_{fv.name}",
@@ -2154,18 +2157,25 @@ def render_download_section(output_dir: Path) -> None:
                         st.session_state[split_ready_key] = [str(p) for p in zip_paths]
                     split_paths = st.session_state.get(split_ready_key, [])
                     if split_paths:
-                        for j, zp_str in enumerate(split_paths):
-                            zp = Path(zp_str)
-                            if zp.exists():
-                                zp_size = zp.stat().st_size / (1024 * 1024)
-                                with open(zp, "rb") as zf:
-                                    st.download_button(
-                                        label=f"📥 {zp.stem} ({zp_size:.0f}MB)",
-                                        data=zf,
-                                        file_name=zp.name,
-                                        mime="application/zip",
-                                        key=f"dl_{folder_name}_split_{j}",
-                                    )
+                        # 分割ZIPは1つずつ選択してダウンロード（メモリ節約）
+                        split_options = {
+                            f"{Path(p).stem} ({Path(p).stat().st_size / (1024*1024):.0f}MB)": p
+                            for p in split_paths if Path(p).exists()
+                        }
+                        if split_options:
+                            selected = st.selectbox(
+                                "ダウンロードするパートを選択",
+                                options=list(split_options.keys()),
+                                key=f"sel_split_{folder_name}",
+                            )
+                            sel_path = Path(split_options[selected])
+                            st.download_button(
+                                label=f"📥 ダウンロード",
+                                data=sel_path.read_bytes(),
+                                file_name=sel_path.name,
+                                mime="application/zip",
+                                key=f"dl_{folder_name}_split",
+                            )
                     continue
                 zip_path = downloads_dir / f"{folder_name}.zip"
                 ready_key = f"zip_ready_{folder_name}"
@@ -2175,14 +2185,13 @@ def render_download_section(output_dir: Path) -> None:
                     st.session_state[ready_key] = True
                 if st.session_state.get(ready_key) and zip_path.exists():
                     zip_size_mb = zip_path.stat().st_size / (1024 * 1024)
-                    with open(zip_path, "rb") as zf:
-                        st.download_button(
-                            label=f"📥 ダウンロード ({zip_size_mb:.0f}MB)",
-                            data=zf,
-                            file_name=f"{folder_name}_{output_dir.name}.zip",
-                            mime="application/zip",
-                            key=f"dl_{folder_name}",
-                        )
+                    st.download_button(
+                        label=f"📥 ダウンロード ({zip_size_mb:.0f}MB)",
+                        data=zip_path.read_bytes(),
+                        file_name=f"{folder_name}_{output_dir.name}.zip",
+                        mime="application/zip",
+                        key=f"dl_{folder_name}",
+                    )
             else:
                 st.button(f"{label} なし", disabled=True, key=f"dl_{folder_name}")
 
@@ -2202,14 +2211,13 @@ def render_download_section(output_dir: Path) -> None:
             st.session_state[ready_key_all] = True
         if st.session_state.get(ready_key_all) and zip_path_all.exists():
             zip_size_mb = zip_path_all.stat().st_size / (1024 * 1024)
-            with open(zip_path_all, "rb") as zf:
-                st.download_button(
-                    label=f"📥 {download_label} ({zip_size_mb:.0f}MB)",
-                    data=zf,
-                    file_name=f"video_output_{output_dir.name}.zip",
-                    mime="application/zip",
-                    key="dl_all",
-                )
+            st.download_button(
+                label=f"📥 {download_label} ({zip_size_mb:.0f}MB)",
+                data=zip_path_all.read_bytes(),
+                file_name=f"video_output_{output_dir.name}.zip",
+                mime="application/zip",
+                key="dl_all",
+            )
     else:
         st.info(f"📦 合計 {total_mb:.0f}MB のため、一括ダウンロードは無効です。カテゴリ別にダウンロードしてください。")
 
