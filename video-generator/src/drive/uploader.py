@@ -7,7 +7,7 @@ import mimetypes
 from pathlib import Path
 from typing import Callable
 
-from src.utils.config import get_gcp_credentials
+from src.utils.config import get_env_var, get_gcp_credentials
 from src.utils.exceptions import DriveUploadError
 
 logger = logging.getLogger(__name__)
@@ -63,6 +63,9 @@ class DriveUploader:
     def upload_folder(self, local_dir: Path, folder_name: str) -> str:
         """フォルダをGoogle Driveにアップロード
 
+        サービスアカウントにはDriveストレージがないため、
+        DRIVE_FOLDER_ID で指定された共有フォルダ内にアップロードする。
+
         Args:
             local_dir: アップロード元のローカルディレクトリ
             folder_name: Drive上に作成するフォルダ名
@@ -71,6 +74,16 @@ class DriveUploader:
             共有リンクURL
         """
         service = self._get_service()
+
+        # 共有フォルダIDを取得
+        shared_folder_id = get_env_var("DRIVE_FOLDER_ID")
+        if not shared_folder_id:
+            raise DriveUploadError(
+                "DRIVE_FOLDER_ID が設定されていません。\n"
+                "1. Google Driveでフォルダを作成\n"
+                "2. サービスアカウントに編集者権限で共有\n"
+                "3. DRIVE_FOLDER_ID にフォルダIDを設定してください"
+            )
 
         # アップロード対象ファイルを収集（_downloads等の内部フォルダを除外）
         upload_files = [
@@ -82,8 +95,8 @@ class DriveUploader:
             raise DriveUploadError("アップロードするファイルがありません。")
 
         try:
-            # ルートフォルダを作成
-            root_folder_id = self._create_folder(service, folder_name)
+            # 共有フォルダ内にサブフォルダを作成
+            root_folder_id = self._create_folder(service, folder_name, parent_id=shared_folder_id)
 
             # フォルダを「リンクを知っている全員が閲覧可能」に設定
             self._make_public(service, root_folder_id)
