@@ -94,8 +94,12 @@ class TTSClient:
                 )
             try:
                 import google.genai as genai
-                self._gemini_client = genai.Client(api_key=api_key)
-                logger.info("Gemini TTS クライアントを初期化しました")
+                from google.genai import types as genai_types
+                self._gemini_client = genai.Client(
+                    api_key=api_key,
+                    http_options=genai_types.HttpOptions(timeout=120_000),
+                )
+                logger.info("Gemini TTS クライアントを初期化しました（timeout=120s）")
             except Exception as e:
                 raise TTSError(f"Gemini TTS の初期化に失敗: {e}", original_error=e)
         return self._gemini_client
@@ -235,7 +239,6 @@ class TTSClient:
                                 ),
                             ),
                         ),
-                        http_options=types.HttpOptions(timeout=120_000),
                     )
                     logger.info("Gemini TTS 使用モデル: %s", model_name)
                     break
