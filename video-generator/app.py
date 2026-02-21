@@ -2048,10 +2048,10 @@ def _create_split_zips(files: list[Path], base_dir: Path, downloads_dir: Path, p
     downloads_dir.mkdir(parents=True, exist_ok=True)
     max_bytes = max_mb * 1024 * 1024
 
-    # ファイルをサイズ順にソート（大きいものから詰める）
+    # ファイルを名前順にソート（Part1=001-010, Part2=011-020 のように連番で分割）
     sorted_files = sorted(
         [f for f in files if f.is_file()],
-        key=lambda f: f.stat().st_size,
+        key=lambda f: f.name,
     )
 
     chunks: list[list[Path]] = []
