@@ -2020,6 +2020,43 @@ def _dir_size_mb(files: list[Path]) -> float:
     return sum(f.stat().st_size for f in files if f.is_file()) / (1024 * 1024)
 
 
+def _create_split_zips(files: list[Path], base_dir: Path, downloads_dir: Path, prefix: str, max_mb: float) -> list[Path]:
+    """ファイルを分割ZIPにまとめる。各ZIPがmax_mb以下になるよう分割。"""
+    downloads_dir.mkdir(parents=True, exist_ok=True)
+    max_bytes = max_mb * 1024 * 1024
+
+    # ファイルをサイズ順にソート（大きいものから詰める）
+    sorted_files = sorted(
+        [f for f in files if f.is_file()],
+        key=lambda f: f.stat().st_size,
+    )
+
+    chunks: list[list[Path]] = []
+    current_chunk: list[Path] = []
+    current_size = 0
+
+    for f in sorted_files:
+        fsize = f.stat().st_size
+        if current_chunk and current_size + fsize > max_bytes:
+            chunks.append(current_chunk)
+            current_chunk = []
+            current_size = 0
+        current_chunk.append(f)
+        current_size += fsize
+
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    zip_paths = []
+    for i, chunk in enumerate(chunks):
+        zip_name = f"{prefix}_part{i + 1}.zip" if len(chunks) > 1 else f"{prefix}.zip"
+        zip_path = downloads_dir / zip_name
+        _create_zip_to_disk(chunk, base_dir, zip_path)
+        zip_paths.append(zip_path)
+
+    return zip_paths
+
+
 _fragment = getattr(st, "fragment", None)
 
 
@@ -2083,36 +2120,27 @@ def render_download_section(output_dir: Path) -> None:
             if files:
                 size_mb = _dir_size_mb(files)
                 if size_mb > MAX_ZIP_MB:
-                    st.warning(f"{label} {size_mb:.0f}MB（ZIP上限超過）")
-                    # 個別ファイルダウンロードにフォールバック（2ステップ）
-                    file_options = {
-                        f"{f.name} ({f.stat().st_size / (1024*1024):.0f}MB)": str(f)
-                        for f in files
-                    }
-                    selected = st.selectbox(
-                        "ファイルを選択",
-                        options=list(file_options.keys()),
-                        key=f"sel_{folder_name}",
-                    )
-                    ready_key = f"ready_ind_{folder_name}"
-                    if st.button("📦 ダウンロード準備", key=f"prep_ind_{folder_name}"):
-                        st.session_state[ready_key] = file_options.get(selected, "")
-                    ready_path_str = st.session_state.get(ready_key, "")
-                    if (
-                        ready_path_str
-                        and selected
-                        and file_options.get(selected) == ready_path_str
-                    ):
-                        ready_file = Path(ready_path_str)
-                        if ready_file.exists():
-                            with open(ready_file, "rb") as sf:
-                                st.download_button(
-                                    label="📥 ダウンロード",
-                                    data=sf,
-                                    file_name=ready_file.name,
-                                    mime="application/octet-stream",
-                                    key=f"dl_{folder_name}_ind",
-                                )
+                    st.info(f"{label} {size_mb:.0f}MB → 分割ZIP")
+                    # 分割ZIPダウンロード
+                    split_ready_key = f"split_ready_{folder_name}"
+                    if st.button(f"📦 分割ZIP作成", key=f"prep_split_{folder_name}"):
+                        with st.spinner("分割ZIP作成中..."):
+                            zip_paths = _create_split_zips(files, output_dir, downloads_dir, folder_name, MAX_ZIP_MB)
+                        st.session_state[split_ready_key] = [str(p) for p in zip_paths]
+                    split_paths = st.session_state.get(split_ready_key, [])
+                    if split_paths:
+                        for j, zp_str in enumerate(split_paths):
+                            zp = Path(zp_str)
+                            if zp.exists():
+                                zp_size = zp.stat().st_size / (1024 * 1024)
+                                with open(zp, "rb") as zf:
+                                    st.download_button(
+                                        label=f"📥 {zp.stem} ({zp_size:.0f}MB)",
+                                        data=zf,
+                                        file_name=zp.name,
+                                        mime="application/zip",
+                                        key=f"dl_{folder_name}_split_{j}",
+                                    )
                     continue
                 zip_path = downloads_dir / f"{folder_name}.zip"
                 ready_key = f"zip_ready_{folder_name}"
