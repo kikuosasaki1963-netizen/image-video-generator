@@ -14,21 +14,26 @@ from pathlib import Path
 
 import streamlit as st
 
-from src.audio.tts import TTSClient
-from src.bgm.beatoven import BeatovenClient
-from src.image.generator import ImageGenerator
-from src.parser.script import ScriptParser
-from src.utils.config import get_env_var, get_gcp_credentials, load_settings, save_settings
-from src.video.editor import Timeline, TimelineEntry, VideoEditor
-from src.video.stock import StockVideoClient
-
-# ページ設定
+# ページ設定（他のst.*より先に呼ぶ必要あり）
 st.set_page_config(
     page_title="動画生成エージェント",
     page_icon="🎬",
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# インポートエラーを検出して表示
+try:
+    from src.audio.tts import TTSClient
+    from src.bgm.beatoven import BeatovenClient
+    from src.image.generator import ImageGenerator
+    from src.parser.script import ScriptParser
+    from src.utils.config import get_env_var, get_gcp_credentials, load_settings, save_settings
+    from src.video.editor import Timeline, TimelineEntry, VideoEditor
+    from src.video.stock import StockVideoClient
+except Exception as _import_err:
+    st.error(f"モジュールのインポートに失敗しました:\n\n```\n{traceback.format_exc()}\n```")
+    st.stop()
 
 
 def get_persistent_avatar_dir() -> Path:
