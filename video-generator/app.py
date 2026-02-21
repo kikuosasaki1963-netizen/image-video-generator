@@ -1998,6 +1998,8 @@ def _create_zip_to_disk(files: list[Path], base_dir: Path, zip_path: Path) -> Pa
     """指定ファイルリストからZIPをディスクに作成（キャッシュ対応）。
 
     zip_path が既に存在し、かつ全ソースファイルより新しい場合は再作成しない。
+    動画・音声など既に圧縮済みのファイルはZIP_STORED（無圧縮）で格納し、
+    メモリ消費を抑える。
     """
     if zip_path.exists():
         zip_mtime = zip_path.stat().st_mtime
@@ -2007,11 +2009,15 @@ def _create_zip_to_disk(files: list[Path], base_dir: Path, zip_path: Path) -> Pa
         if not needs_rebuild:
             return zip_path
 
+    # 圧縮不要な拡張子（既に圧縮済み）
+    NO_COMPRESS_EXTS = {".mp4", ".mp3", ".wav", ".m4a", ".webm", ".ogg", ".jpg", ".jpeg", ".png", ".webp"}
+
     zip_path.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(zip_path, "w") as zf:
         for f in files:
             if f.is_file():
-                zf.write(f, f.relative_to(base_dir))
+                compression = zipfile.ZIP_STORED if f.suffix.lower() in NO_COMPRESS_EXTS else zipfile.ZIP_DEFLATED
+                zf.write(f, f.relative_to(base_dir), compress_type=compression)
     return zip_path
 
 
@@ -2120,12 +2126,14 @@ def render_download_section(output_dir: Path) -> None:
             if files:
                 size_mb = _dir_size_mb(files)
                 if size_mb > MAX_ZIP_MB:
-                    st.info(f"{label} {size_mb:.0f}MB → 分割ZIP")
+                    SPLIT_ZIP_MB = 200  # 分割ZIP上限（メモリ節約のため小さめ）
+                    num_parts = max(1, int(size_mb / SPLIT_ZIP_MB) + 1)
+                    st.info(f"{label} {size_mb:.0f}MB → 約{num_parts}個の分割ZIP")
                     # 分割ZIPダウンロード
                     split_ready_key = f"split_ready_{folder_name}"
                     if st.button(f"📦 分割ZIP作成", key=f"prep_split_{folder_name}"):
                         with st.spinner("分割ZIP作成中..."):
-                            zip_paths = _create_split_zips(files, output_dir, downloads_dir, folder_name, MAX_ZIP_MB)
+                            zip_paths = _create_split_zips(files, output_dir, downloads_dir, folder_name, SPLIT_ZIP_MB)
                         st.session_state[split_ready_key] = [str(p) for p in zip_paths]
                     split_paths = st.session_state.get(split_ready_key, [])
                     if split_paths:
