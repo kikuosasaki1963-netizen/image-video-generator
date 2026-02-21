@@ -2,6 +2,15 @@
 
 from __future__ import annotations
 
+# video-generator/ ディレクトリの src/ を優先するようパスを調整
+# （リポジトリルートにも別の src/ パッケージがあるため）
+import sys as _sys
+from pathlib import Path as _Path
+
+_app_dir = str(_Path(__file__).resolve().parent)
+if _app_dir not in _sys.path:
+    _sys.path.insert(0, _app_dir)
+
 import base64
 import json
 import os
