@@ -1977,6 +1977,11 @@ def main_page() -> None:
                             st.session_state.generation_complete = True
                         break
 
+            # ステップモードでは個別ステップ完了でも「完了」と見なす
+            # （generation_completeはタイムライン完了時のみTrueになるため）
+            if not is_complete and st.session_state.get("step_mode"):
+                is_complete = True
+
             if is_complete:
                 st.success(f"✅ 生成完了！出力先: {output_dir}")
             else:
