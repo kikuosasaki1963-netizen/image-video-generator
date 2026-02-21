@@ -110,8 +110,6 @@ class DriveUploader:
                     str(file_path),
                     content_type=mime_type or "application/octet-stream",
                 )
-                # 公開アクセス設定
-                blob.make_public()
 
                 logger.debug(f"アップロード: {blob_name}")
 
