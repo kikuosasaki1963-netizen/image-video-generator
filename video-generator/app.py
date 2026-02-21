@@ -2839,6 +2839,9 @@ def run_step_images(script, prompts, output_dir: Path, history_entry: dict | Non
     """ステップ4: 画像生成（3枚毎にチェックポイント+gc.collect）"""
     import gc
 
+    # 前ステップのリソースを解放（特にTTSのGeminiクライアント）
+    gc.collect()
+
     generated_images = {}
     reused_count = 0
     generated_count = 0
@@ -3216,6 +3219,11 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
             st.info("⏭️ 音声生成をスキップしました")
         overall_progress.progress(0.25)
 
+        # ステップ間リソース解放（TTS→次のステップ）
+        import gc as _gc
+        import time as _time
+        _gc.collect()
+
         # STEP 2: BGM生成
         bgm_result = {"files": {"bgm": None}}
         if generate_bgm:
@@ -3246,6 +3254,12 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
         else:
             st.info("⏭️ 背景動画の取得をスキップしました")
         overall_progress.progress(0.5)
+
+        # Gemini APIレート制限回復のため待機（TTS/BGM/動画で消費した分）
+        if generate_audio or generate_bg_video:
+            st.info("⏳ APIレート制限回復中（30秒）...")
+            _gc.collect()
+            _time.sleep(30)
 
         # STEP 4: 画像生成
         img_result = {"files": {"images": {}}}
