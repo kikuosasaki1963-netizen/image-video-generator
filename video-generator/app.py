@@ -108,8 +108,11 @@ def save_avatar_to_settings(speaker_key: str, image_data: bytes, ext: str) -> No
     save_settings(settings)
 
 
-# 起動時にアバターを復元
-restore_avatars_from_settings()
+# 起動時にアバターを復元（Cloudでは失敗しても続行）
+try:
+    restore_avatars_from_settings()
+except Exception as _avatar_err:
+    pass  # アバター復元失敗は致命的でない
 
 
 def time_to_seconds(time_str: str) -> float:
@@ -3698,4 +3701,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as _main_err:
+        st.error(f"アプリケーションエラー:\n\n```\n{traceback.format_exc()}\n```")
