@@ -2146,9 +2146,9 @@ def render_download_section(output_dir: Path) -> None:
             if files:
                 size_mb = _dir_size_mb(files)
                 if size_mb > MAX_ZIP_MB:
-                    SPLIT_ZIP_MB = 200  # 分割ZIP上限（メモリ節約のため小さめ）
+                    SPLIT_ZIP_MB = 480  # maxMessageSize(500)に近い上限
                     num_parts = max(1, int(size_mb / SPLIT_ZIP_MB) + 1)
-                    st.info(f"{label} {size_mb:.0f}MB → 約{num_parts}個の分割ZIP")
+                    st.info(f"{label} {size_mb:.0f}MB → {num_parts}個のZIP")
                     # 分割ZIPダウンロード
                     split_ready_key = f"split_ready_{folder_name}"
                     if st.button(f"📦 分割ZIP作成", key=f"prep_split_{folder_name}"):
@@ -2157,25 +2157,34 @@ def render_download_section(output_dir: Path) -> None:
                         st.session_state[split_ready_key] = [str(p) for p in zip_paths]
                     split_paths = st.session_state.get(split_ready_key, [])
                     if split_paths:
-                        # 分割ZIPは1つずつ選択してダウンロード（メモリ節約）
-                        split_options = {
-                            f"{Path(p).stem} ({Path(p).stat().st_size / (1024*1024):.0f}MB)": p
-                            for p in split_paths if Path(p).exists()
-                        }
-                        if split_options:
-                            selected = st.selectbox(
-                                "ダウンロードするパートを選択",
-                                options=list(split_options.keys()),
-                                key=f"sel_split_{folder_name}",
-                            )
-                            sel_path = Path(split_options[selected])
-                            st.download_button(
-                                label=f"📥 ダウンロード",
-                                data=sel_path.read_bytes(),
-                                file_name=sel_path.name,
-                                mime="application/zip",
-                                key=f"dl_{folder_name}_split",
-                            )
+                        existing = [p for p in split_paths if Path(p).exists()]
+                        st.write(f"**全{len(existing)}パート** — 順番にダウンロードしてください")
+                        # パート番号で順次ダウンロード（前へ/次へ方式）
+                        part_key = f"split_part_{folder_name}"
+                        if part_key not in st.session_state:
+                            st.session_state[part_key] = 0
+                        idx = st.session_state[part_key]
+                        idx = min(idx, len(existing) - 1)
+                        nav_cols = st.columns([1, 2, 1])
+                        with nav_cols[0]:
+                            if st.button("◀ 前", key=f"prev_{folder_name}", disabled=(idx == 0)):
+                                st.session_state[part_key] = idx - 1
+                                st.rerun()
+                        with nav_cols[1]:
+                            st.write(f"**Part {idx + 1} / {len(existing)}**")
+                        with nav_cols[2]:
+                            if st.button("次 ▶", key=f"next_{folder_name}", disabled=(idx >= len(existing) - 1)):
+                                st.session_state[part_key] = idx + 1
+                                st.rerun()
+                        sel_path = Path(existing[idx])
+                        sel_size = sel_path.stat().st_size / (1024 * 1024)
+                        st.download_button(
+                            label=f"📥 Part {idx + 1} をダウンロード ({sel_size:.0f}MB)",
+                            data=sel_path.read_bytes(),
+                            file_name=sel_path.name,
+                            mime="application/zip",
+                            key=f"dl_{folder_name}_split",
+                        )
                     continue
                 zip_path = downloads_dir / f"{folder_name}.zip"
                 ready_key = f"zip_ready_{folder_name}"
