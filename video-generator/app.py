@@ -2130,18 +2130,43 @@ _fragment = getattr(st, "fragment", None)
 @(_fragment if _fragment else lambda fn: fn)
 def render_download_section(output_dir: Path) -> None:
     """STEP 5: ダウンロードセクション（fragmentで分離）"""
-    downloads_dir = output_dir / "_downloads"
+    on_cloud = is_streamlit_cloud()
 
     # ファイル種別ごとのカウント
     audio_files = list((output_dir / "audio").rglob("*")) if (output_dir / "audio").exists() else []
     image_files = list((output_dir / "images").rglob("*")) if (output_dir / "images").exists() else []
     bgm_files = list((output_dir / "bgm").rglob("*")) if (output_dir / "bgm").exists() else []
-    # 完成動画（videos直下のmp4）と素材動画（backgrounds内）を分離
     videos_dir = output_dir / "videos"
     final_videos = [f for f in videos_dir.glob("*.mp4") if f.is_file()] if videos_dir.exists() else []
     bg_videos = list((videos_dir / "backgrounds").rglob("*.mp4")) if (videos_dir / "backgrounds").exists() else []
 
-    # 完成動画がある場合は目立たせて表示（メモリ節約: 1つずつ準備）
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("🎤 音声", f"{len([f for f in audio_files if f.is_file()])}件")
+    with col2:
+        st.metric("🖼️ 画像", f"{len([f for f in image_files if f.is_file()])}枚")
+    with col3:
+        st.metric("🎵 BGM", f"{len([f for f in bgm_files if f.is_file()])}件")
+    with col4:
+        st.metric("🎬 素材動画", f"{len(bg_videos)}本")
+
+    # GCSアップロード & クラウドリンク表示
+    _render_drive_upload(output_dir)
+
+    # Streamlit Cloud: クラウドリンクのみ。ZIPダウンロードは使わない（OOM防止）
+    if on_cloud:
+        upload_links = st.session_state.get("cloud_upload_links")
+        if upload_links:
+            st.info("☁️ 上のリンクからダウンロードしてください。他のPCからは「☁️ クラウドファイル」ページを使ってください。")
+        else:
+            st.warning("まず「📤 クラウドにアップロード」してください。アップロード後にダウンロードリンクが表示されます。")
+        return
+
+    # ── 以下はローカル環境のみ ──
+    downloads_dir = output_dir / "_downloads"
+    st.divider()
+
+    # 完成動画
     if final_videos:
         st.markdown("### 🎬 完成動画")
         for fv in final_videos:
@@ -2163,21 +2188,6 @@ def render_download_section(output_dir: Path) -> None:
                     )
         st.divider()
 
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("🎤 音声", f"{len([f for f in audio_files if f.is_file()])}件")
-    with col2:
-        st.metric("🖼️ 画像", f"{len([f for f in image_files if f.is_file()])}枚")
-    with col3:
-        st.metric("🎵 BGM", f"{len([f for f in bgm_files if f.is_file()])}件")
-    with col4:
-        st.metric("🎬 素材動画", f"{len(bg_videos)}本")
-
-    # Google Drive アップロード
-    _render_drive_upload(output_dir)
-
-    st.divider()
-
     # カテゴリ別ZIPダウンロード
     categories = [
         ("🎤 音声", "audio", [f for f in audio_files if f.is_file()]),
@@ -2186,43 +2196,41 @@ def render_download_section(output_dir: Path) -> None:
         ("🎬 素材動画", "videos", bg_videos),
     ]
 
-    MAX_ZIP_MB = 500  # ZIPダウンロード上限(MB) — maxMessageSizeに合わせる
+    MAX_ZIP_MB = 500
 
     st.markdown("**カテゴリ別ダウンロード**")
     dl_cols = st.columns(len(categories))
-    for col, (label, folder_name, files) in zip(dl_cols, categories):
+    for col, (label, cat_folder, files) in zip(dl_cols, categories):
         with col:
             if files:
                 size_mb = _dir_size_mb(files)
                 if size_mb > MAX_ZIP_MB:
-                    SPLIT_ZIP_MB = 480  # maxMessageSize(500)に近い上限
+                    SPLIT_ZIP_MB = 480
                     num_parts = max(1, int(size_mb / SPLIT_ZIP_MB) + 1)
                     st.info(f"{label} {size_mb:.0f}MB → {num_parts}個のZIP")
-                    # 分割ZIPダウンロード
-                    split_ready_key = f"split_ready_{folder_name}"
-                    if st.button(f"📦 分割ZIP作成", key=f"prep_split_{folder_name}"):
+                    split_ready_key = f"split_ready_{cat_folder}"
+                    if st.button(f"📦 分割ZIP作成", key=f"prep_split_{cat_folder}"):
                         with st.spinner("分割ZIP作成中..."):
-                            zip_paths = _create_split_zips(files, output_dir, downloads_dir, folder_name, SPLIT_ZIP_MB)
+                            zip_paths = _create_split_zips(files, output_dir, downloads_dir, cat_folder, SPLIT_ZIP_MB)
                         st.session_state[split_ready_key] = [str(p) for p in zip_paths]
                     split_paths = st.session_state.get(split_ready_key, [])
                     if split_paths:
                         existing = [p for p in split_paths if Path(p).exists()]
                         st.write(f"**全{len(existing)}パート** — 順番にダウンロードしてください")
-                        # パート番号で順次ダウンロード（前へ/次へ方式）
-                        part_key = f"split_part_{folder_name}"
+                        part_key = f"split_part_{cat_folder}"
                         if part_key not in st.session_state:
                             st.session_state[part_key] = 0
                         idx = st.session_state[part_key]
                         idx = min(idx, len(existing) - 1)
                         nav_cols = st.columns([1, 2, 1])
                         with nav_cols[0]:
-                            if st.button("◀ 前", key=f"prev_{folder_name}", disabled=(idx == 0)):
+                            if st.button("◀ 前", key=f"prev_{cat_folder}", disabled=(idx == 0)):
                                 st.session_state[part_key] = idx - 1
                                 st.rerun()
                         with nav_cols[1]:
                             st.write(f"**Part {idx + 1} / {len(existing)}**")
                         with nav_cols[2]:
-                            if st.button("次 ▶", key=f"next_{folder_name}", disabled=(idx >= len(existing) - 1)):
+                            if st.button("次 ▶", key=f"next_{cat_folder}", disabled=(idx >= len(existing) - 1)):
                                 st.session_state[part_key] = idx + 1
                                 st.rerun()
                         sel_path = Path(existing[idx])
@@ -2232,12 +2240,12 @@ def render_download_section(output_dir: Path) -> None:
                             data=sel_path.read_bytes(),
                             file_name=sel_path.name,
                             mime="application/zip",
-                            key=f"dl_{folder_name}_split",
+                            key=f"dl_{cat_folder}_split",
                         )
                     continue
-                zip_path = downloads_dir / f"{folder_name}.zip"
-                ready_key = f"zip_ready_{folder_name}"
-                if st.button(f"📦 {label} を準備 ({size_mb:.0f}MB)", key=f"prep_{folder_name}"):
+                zip_path = downloads_dir / f"{cat_folder}.zip"
+                ready_key = f"zip_ready_{cat_folder}"
+                if st.button(f"📦 {label} を準備 ({size_mb:.0f}MB)", key=f"prep_{cat_folder}"):
                     with st.spinner("ZIP作成中..."):
                         _create_zip_to_disk(files, output_dir, zip_path)
                     st.session_state[ready_key] = True
@@ -2246,12 +2254,12 @@ def render_download_section(output_dir: Path) -> None:
                     st.download_button(
                         label=f"📥 ダウンロード ({zip_size_mb:.0f}MB)",
                         data=zip_path.read_bytes(),
-                        file_name=f"{folder_name}_{output_dir.name}.zip",
+                        file_name=f"{cat_folder}_{output_dir.name}.zip",
                         mime="application/zip",
-                        key=f"dl_{folder_name}",
+                        key=f"dl_{cat_folder}",
                     )
             else:
-                st.button(f"{label} なし", disabled=True, key=f"dl_{folder_name}")
+                st.button(f"{label} なし", disabled=True, key=f"dl_{cat_folder}")
 
     # 一括ダウンロード（500MB以下の場合のみ）
     all_output_files = [
