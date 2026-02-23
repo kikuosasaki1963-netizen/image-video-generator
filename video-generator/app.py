@@ -4145,7 +4145,7 @@ def cloud_files_page() -> None:
 
     except Exception as e:
         st.error(f"GCSへの接続に失敗しました: {e}")
-        logger.error(f"GCSブラウザエラー: {e}")
+        logging.getLogger(__name__).error(f"GCSブラウザエラー: {e}")
 
 
 def main() -> None:
