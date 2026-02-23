@@ -49,27 +49,6 @@ def save_settings(settings: dict[str, Any], config_path: str | None = None) -> N
         json.dump(settings, f, ensure_ascii=False, indent=4)
 
 
-def load_pronunciation_dict(config_path: str | None = None) -> dict[str, str]:
-    """読み辞書を読み込む
-
-    Args:
-        config_path: 辞書ファイルのパス。Noneの場合はデフォルトパスを使用
-
-    Returns:
-        原文→読みの辞書
-    """
-    if config_path is None:
-        config_path = Path(__file__).parent.parent.parent / "config" / "pronunciation.json"
-    else:
-        config_path = Path(config_path)
-
-    if not config_path.exists():
-        return {}
-
-    with open(config_path, encoding="utf-8") as f:
-        return json.load(f)
-
-
 def get_env_var(key: str, default: str | None = None) -> str | None:
     """環境変数を取得する
 

@@ -13,7 +13,6 @@ if _app_dir not in _sys.path:
 
 import base64
 import json
-import logging
 import os
 import shutil
 import traceback
@@ -517,14 +516,11 @@ def get_history_file_path() -> Path:
     出力先フォルダに依存すると、セッション切れやパス変更で履歴が見つからなくなるため。
     """
     if is_streamlit_cloud():
-        # Streamlit Cloud: 書き込み可能なディレクトリを使用
-        # /mount/src は読み取り専用の可能性があるため、cwd を優先
-        history_dir = Path.cwd() / ".app_data"
-        try:
-            history_dir.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            # cwdも書き込み不可の場合は/tmpにフォールバック
-            history_dir = Path("/tmp") / ".app_data"
+        # Streamlit Cloud: /mount/src配下の永続ディレクトリを使用
+        history_dir = Path("/mount/src") / ".app_data"
+        # /mount/srcが存在しない場合はアプリルートにフォールバック
+        if not Path("/mount/src").exists():
+            history_dir = Path.cwd() / ".app_data"
     else:
         # ローカル: 出力フォルダに保存（従来互換）
         if "custom_output_folder" in st.session_state and st.session_state.custom_output_folder:
@@ -590,7 +586,7 @@ def save_generation_history(history: list[dict]) -> None:
         with open(history_file, "w", encoding="utf-8") as f:
             json.dump(history, f, ensure_ascii=False, indent=2)
     except (IOError, OSError) as e:
-        logging.getLogger(__name__).warning(f"履歴ファイルの保存に失敗: {e}")
+        print(f"履歴ファイルの保存に失敗: {e}")
 
 
 def log_error_to_file(output_dir: Path | str, error_type: str, error_message: str, details: str = "") -> None:
@@ -882,51 +878,6 @@ def main_page() -> None:
 
         if not history:
             st.info("履歴がありません。生成を実行すると履歴が記録されます。")
-
-            # 履歴がなくても出力フォルダが残っている場合に救出オプションを表示
-            orphan_folders = get_existing_output_folders()
-            if orphan_folders:
-                st.warning(f"⚠️ 履歴にない出力フォルダが {len(orphan_folders)} 件見つかりました")
-                for folder_name, folder_path in orphan_folders:
-                    folder_p = Path(folder_path)
-                    file_count = sum(1 for f in folder_p.rglob("*") if f.is_file() and not f.relative_to(folder_p).parts[0].startswith("_"))
-                    total_mb = sum(f.stat().st_size for f in folder_p.rglob("*") if f.is_file() and not f.relative_to(folder_p).parts[0].startswith("_")) / (1024 * 1024)
-                    col_info, col_upload, col_dl = st.columns([3, 1, 1])
-                    with col_info:
-                        st.markdown(f"**{folder_name}** — {file_count}ファイル / {total_mb:.0f}MB")
-                    with col_upload:
-                        # _cloud_links.json があればリンク表示
-                        rescued_links = _load_cloud_links(folder_p)
-                        if rescued_links:
-                            st.caption(f"☁️ {len(rescued_links)}件のGCSリンクあり")
-                        if st.button("☁️ GCSにアップロード", key=f"rescue_upload_{folder_name}"):
-                            try:
-                                from src.drive.uploader import DriveUploader
-                                gcp_creds = get_gcp_credentials()
-                                if gcp_creds:
-                                    with st.spinner("☁️ アップロード中..."):
-                                        uploader = DriveUploader()
-                                        gcs_folder = f"video_output_{folder_name}"
-                                        uploader.upload_folder(folder_p, gcs_folder)
-                                        links = uploader.get_file_links(gcs_folder)
-                                        st.session_state["cloud_upload_links"] = links
-                                        _save_cloud_links(folder_p, links)
-                                        st.session_state.output_dir = folder_p
-                                    st.success(f"☁️ {len(links)}ファイルをアップロードしました")
-                                    st.rerun()
-                                else:
-                                    st.error("GCP認証情報がありません")
-                            except Exception as e:
-                                st.error(f"アップロード失敗: {e}")
-                    with col_dl:
-                        if st.button("📥 DLセクション表示", key=f"rescue_dl_{folder_name}"):
-                            # ディスクからGCSリンクを復元
-                            disk_links = _load_cloud_links(folder_p)
-                            if disk_links:
-                                st.session_state["cloud_upload_links"] = disk_links
-                            st.session_state.output_dir = folder_p
-                            st.session_state.generation_complete = True
-                            st.rerun()
         else:
             # 中断された生成
             interrupted_entries = [e for e in history if e["status"] == "interrupted"]
@@ -1062,108 +1013,36 @@ def main_page() -> None:
                             delete_history_entry(entry["id"])
                             st.rerun()
 
-                    # ダウンロードパネル展開
+                    # ダウンロードパネル展開（準備ボタンで1ファイルだけ読み込み）
                     if st.session_state.get(f"show_dl_{entry['id']}") and folder_path.exists():
-                        # GCSリンク: セッション → ディスク(_cloud_links.json) の順で復元
-                        h_upload_links = st.session_state.get("cloud_upload_links")
-                        if not h_upload_links:
-                            h_upload_links = _load_cloud_links(folder_path)
-                            if h_upload_links:
-                                st.session_state["cloud_upload_links"] = h_upload_links
-
-                        if h_upload_links:
-                            hd_col1, hd_col2 = st.columns([4, 1])
-                            with hd_col1:
-                                st.markdown("☁️ **クラウドからダウンロード:**")
-                            with hd_col2:
-                                if st.button("🔄 更新", key=f"refresh_{entry['id']}", help="リンクを再生成"):
-                                    refreshed = _refresh_cloud_links(folder_path)
-                                    if refreshed:
-                                        h_upload_links = refreshed
-                                        st.rerun()
-                            for item in h_upload_links:
-                                filename = item["name"].split("/")[-1]
-                                size_str = f"{item['size_mb']:.1f}MB" if item["size_mb"] >= 1 else f"{item['size_mb'] * 1024:.0f}KB"
-                                st.markdown(f"[📥 {filename}]({item['url']})　`{size_str}`")
-                        elif is_streamlit_cloud():
-                            # Streamlit Cloud: st.download_buttonを使わずアップロードを案内
-                            st.info("GCSリンクがありません。クラウドにアップロードしてください。")
-                            if st.button("☁️ GCSにアップロード", key=f"hupload_{entry['id']}"):
-                                try:
-                                    from src.drive.uploader import DriveUploader
-                                    gcp_creds = get_gcp_credentials()
-                                    if gcp_creds:
-                                        with st.spinner("☁️ アップロード中..."):
-                                            uploader = DriveUploader()
-                                            gcs_folder = f"video_output_{folder_path.name}"
-                                            uploader.upload_folder(folder_path, gcs_folder)
-                                            links = uploader.get_file_links(gcs_folder)
-                                            st.session_state["cloud_upload_links"] = links
-                                            _save_cloud_links(folder_path, links)
-                                        st.success(f"☁️ {len(links)}ファイルをアップロード完了")
-                                        st.rerun()
-                                    else:
-                                        st.error("GCP認証情報がありません")
-                                except Exception as e:
-                                    st.error(f"アップロード失敗: {e}")
+                        dl_files = sorted([f for f in folder_path.rglob("*") if f.is_file() and f.name != "error_log.txt"])
+                        if dl_files:
+                            h_file_options = {}
+                            for f in dl_files:
+                                f_mb = f.stat().st_size / (1024 * 1024)
+                                size_label = f"{f_mb:.0f}MB" if f_mb >= 1 else f"{f_mb * 1024:.0f}KB"
+                                rel_path = f.relative_to(folder_path)
+                                h_file_options[f"{rel_path} ({size_label})"] = str(f)
+                            h_selected = st.selectbox(
+                                "ファイルを選択",
+                                options=list(h_file_options.keys()),
+                                key=f"hsel_{entry['id']}",
+                            )
+                            h_ready_key = f"hready_{entry['id']}"
+                            if st.button("📦 ダウンロード準備", key=f"hprep_{entry['id']}"):
+                                st.session_state[h_ready_key] = h_file_options.get(h_selected, "")
+                            if st.session_state.get(h_ready_key) and h_selected and h_file_options.get(h_selected) == st.session_state.get(h_ready_key):
+                                h_ready_file = Path(st.session_state[h_ready_key])
+                                if h_ready_file.exists():
+                                    st.download_button(
+                                        label="📥 ダウンロード",
+                                        data=h_ready_file.read_bytes(),
+                                        file_name=h_ready_file.name,
+                                        mime="application/octet-stream",
+                                        key=f"hdl_{entry['id']}",
+                                    )
                         else:
-                            # ローカル環境: ファイル選択 + 50MB以下のみst.download_button
-                            dl_files = sorted([
-                                f for f in folder_path.rglob("*")
-                                if f.is_file() and f.name != "error_log.txt"
-                                and not f.relative_to(folder_path).parts[0].startswith("_")
-                            ])
-                            if dl_files:
-                                h_file_options = {}
-                                for f in dl_files:
-                                    f_mb = f.stat().st_size / (1024 * 1024)
-                                    size_label = f"{f_mb:.0f}MB" if f_mb >= 1 else f"{f_mb * 1024:.0f}KB"
-                                    rel_path = f.relative_to(folder_path)
-                                    h_file_options[f"{rel_path} ({size_label})"] = str(f)
-                                h_selected = st.selectbox(
-                                    "ファイルを選択",
-                                    options=list(h_file_options.keys()),
-                                    key=f"hsel_{entry['id']}",
-                                )
-                                if h_selected:
-                                    sel_path = Path(h_file_options[h_selected])
-                                    sel_mb = sel_path.stat().st_size / (1024 * 1024) if sel_path.exists() else 0
-                                    if sel_mb > _DOWNLOAD_SIZE_LIMIT_MB:
-                                        st.warning(f"⚠️ {sel_mb:.0f}MB — クラウドにアップロードしてからダウンロードしてください")
-                                        if st.button("☁️ GCSにアップロード", key=f"hupload_{entry['id']}"):
-                                            try:
-                                                from src.drive.uploader import DriveUploader
-                                                gcp_creds = get_gcp_credentials()
-                                                if gcp_creds:
-                                                    with st.spinner("☁️ アップロード中..."):
-                                                        uploader = DriveUploader()
-                                                        gcs_folder = f"video_output_{folder_path.name}"
-                                                        uploader.upload_folder(folder_path, gcs_folder)
-                                                        links = uploader.get_file_links(gcs_folder)
-                                                        st.session_state["cloud_upload_links"] = links
-                                                        _save_cloud_links(folder_path, links)
-                                                    st.success(f"☁️ {len(links)}ファイルをアップロード完了")
-                                                    st.rerun()
-                                                else:
-                                                    st.error("GCP認証情報がありません")
-                                            except Exception as e:
-                                                st.error(f"アップロード失敗: {e}")
-                                    else:
-                                        h_ready_key = f"hready_{entry['id']}"
-                                        if st.button("📦 ダウンロード準備", key=f"hprep_{entry['id']}"):
-                                            st.session_state[h_ready_key] = h_file_options.get(h_selected, "")
-                                        if st.session_state.get(h_ready_key) and h_file_options.get(h_selected) == st.session_state.get(h_ready_key):
-                                            h_ready_file = Path(st.session_state[h_ready_key])
-                                            if h_ready_file.exists():
-                                                st.download_button(
-                                                    label="📥 ダウンロード",
-                                                    data=h_ready_file.read_bytes(),
-                                                    file_name=h_ready_file.name,
-                                                    mime="application/octet-stream",
-                                                    key=f"hdl_{entry['id']}",
-                                                )
-                            else:
-                                st.caption("ダウンロード可能なファイルがありません")
+                            st.caption("ダウンロード可能なファイルがありません")
 
             # 全削除ボタン
             st.divider()
@@ -1514,7 +1393,8 @@ def main_page() -> None:
         for p in prompts.prompts:
             st.markdown(f"**[{p.number}]** `{p.start_time}` - `{p.end_time}` | {p.prompt}")
     else:
-        st.info("💡 画像プロンプトは未生成です。必要に応じて上の「🎨 台本から画像プロンプトを自動生成」ボタンで生成できます。")
+        st.warning("⚠️ 画像プロンプトがまだ生成されていません。上の「🎨 台本から画像プロンプトを自動生成」ボタンをクリックしてください。")
+        st.info("💡 または、ステップモードで「STEP 4: 画像生成」を実行すると自動的に生成されます。")
 
     # STEP 3: 音声プレビュー
     if script:
@@ -1847,16 +1727,11 @@ def main_page() -> None:
                         full_wav.unlink(missing_ok=True)
                     st.session_state.audio_files = {}
 
-                # ステップモード用GCS Uploader初期化
-                _step_uploader, _step_gcs_folder = _init_gcs_uploader(step_output_dir)
-
                 try:
                     if pending_step == "audio":
                         run_step_audio(script, step_output_dir, step_history)
-                        _upload_step_to_gcs(step_output_dir, "audio", _step_uploader, _step_gcs_folder)
                     elif pending_step == "bgm":
                         run_step_bgm(script, prompts, step_output_dir, step_history)
-                        _upload_step_to_gcs(step_output_dir, "bgm", _step_uploader, _step_gcs_folder)
                     elif pending_step == "bg_video":
                         _bg_src = st.session_state.get("_pending_bg_source", "ストック")
                         use_ai = _bg_src == "AI生成"
@@ -1870,10 +1745,8 @@ def main_page() -> None:
                             use_ai=use_ai, ai_duration=ai_dur, ai_max_clips=ai_clips,
                             speed_factor=spd, number_of_videos=nvid, hybrid=use_hybrid,
                         )
-                        _upload_step_to_gcs(step_output_dir, "videos/backgrounds", _step_uploader, _step_gcs_folder)
                     elif pending_step == "images":
                         run_step_images(script, prompts, step_output_dir, step_history)
-                        _upload_step_to_gcs(step_output_dir, "images", _step_uploader, _step_gcs_folder)
                     elif pending_step == "timeline":
                         materials = load_existing_materials(str(step_output_dir))
                         st.session_state.audio_files = materials["audio_files"]
@@ -1883,7 +1756,6 @@ def main_page() -> None:
                             Path(materials["bgm"]) if materials["bgm"] else None,
                             step_history,
                         )
-                        _upload_step_to_gcs(step_output_dir, "videos", _step_uploader, _step_gcs_folder)
                         st.session_state.generation_complete = True
                 except Exception as e:
                     st.error(f"生成エラー: {e}")
@@ -2004,40 +1876,16 @@ def main_page() -> None:
 
         else:
             # 一括モード（従来方式）
-            # 再利用モードの状態を確認
-            _reuse = st.session_state.reuse_mode
-            _has_reuse_audio = _reuse["enabled"] and bool(_reuse["audio_files"])
-            _has_reuse_images = _reuse["enabled"] and bool(_reuse["images"])
-            _has_reuse_bgm = _reuse["enabled"] and _reuse["bgm"] is not None
-            _has_reuse_video = _reuse["enabled"] and bool(_reuse.get("videos"))
-
-            if _reuse["enabled"]:
-                reuse_summary = []
-                if _has_reuse_audio:
-                    reuse_summary.append(f"音声{len(_reuse['audio_files'])}件")
-                if _has_reuse_images:
-                    reuse_summary.append(f"画像{len(_reuse['images'])}枚")
-                if _has_reuse_bgm:
-                    reuse_summary.append("BGM")
-                if _has_reuse_video:
-                    reuse_summary.append(f"動画{len(_reuse.get('videos', {}))}本")
-                if reuse_summary:
-                    st.success(f"♻️ 再利用素材: {', '.join(reuse_summary)}（チェックを入れた項目のみ再利用/生成されます）")
-
             st.subheader("🎯 生成する素材を選択")
             col_audio, col_image, col_bgm, col_bg_video = st.columns(4)
             with col_audio:
-                _audio_label = "♻️ 音声（再利用）" if _has_reuse_audio else "🎤 音声"
-                generate_audio = st.checkbox(_audio_label, value=True, key="generate_audio_checkbox")
+                generate_audio = st.checkbox("🎤 音声", value=True, key="generate_audio_checkbox")
             with col_image:
-                _image_label = "♻️ 画像（再利用）" if _has_reuse_images else "🖼️ 画像"
-                generate_images = st.checkbox(_image_label, value=True, key="generate_images_checkbox")
+                generate_images = st.checkbox("🖼️ 画像", value=True, key="generate_images_checkbox")
             with col_bgm:
-                _bgm_label = "♻️ BGM（再利用）" if _has_reuse_bgm else "🎵 BGM"
-                generate_bgm = st.checkbox(_bgm_label, value=True, key="generate_bgm_checkbox")
+                generate_bgm = st.checkbox("🎵 BGM", value=True, key="generate_bgm_checkbox")
             with col_bg_video:
-                _video_label = "♻️ 動画（再利用）" if _has_reuse_video else "🎬 背景動画"
-                generate_bg_video = st.checkbox(_video_label, value=True, key="generate_bg_video_checkbox")
+                generate_bg_video = st.checkbox("🎬 背景動画", value=True, key="generate_bg_video_checkbox")
 
             if generate_bg_video:
                 batch_bg_source = st.radio(
@@ -2232,94 +2080,18 @@ def _create_split_zips(files: list[Path], base_dir: Path, downloads_dir: Path, p
     return zip_paths
 
 
-_fragment = getattr(st, "fragment", None)
+def _render_drive_upload(output_dir: Path) -> None:
+    """クラウドストレージアップロードUI"""
+    st.markdown("### 📤 クラウドにアップロード")
 
-_DOWNLOAD_SIZE_LIMIT_MB = 50  # st.download_button で安全にダウンロードできる上限
+    # アップロード済みリンクがあれば表示
+    upload_links = st.session_state.get("cloud_upload_links")
+    if upload_links:
+        st.success(f"アップロード完了！ ({len(upload_links)}ファイル)")
+        for item in upload_links:
+            size_str = f" ({item['size_mb']:.0f}MB)" if item["size_mb"] > 1 else ""
+            st.markdown(f"- [{item['name']}]({item['url']}){size_str}")
 
-_CLOUD_LINKS_FILENAME = "_cloud_links.json"
-
-
-def _save_cloud_links(output_dir: Path, links: list[dict]) -> None:
-    """GCSリンク情報をディスクに永続化"""
-    try:
-        link_file = output_dir / _CLOUD_LINKS_FILENAME
-        existing: list[dict] = []
-        if link_file.exists():
-            existing = json.loads(link_file.read_text(encoding="utf-8"))
-        # 既存リンクを名前でマージ（新しいものが優先）
-        by_name = {item["name"]: item for item in existing}
-        for item in links:
-            by_name[item["name"]] = item
-        merged = list(by_name.values())
-        link_file.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"クラウドリンク保存失敗: {e}")
-
-
-def _load_cloud_links(output_dir: Path) -> list[dict] | None:
-    """ディスクからGCSリンク情報を読み込み（なければNone）"""
-    try:
-        link_file = output_dir / _CLOUD_LINKS_FILENAME
-        if link_file.exists():
-            data = json.loads(link_file.read_text(encoding="utf-8"))
-            if isinstance(data, list) and data:
-                return data
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"クラウドリンク読み込み失敗: {e}")
-    return None
-
-
-def _refresh_cloud_links(output_dir: Path) -> list[dict] | None:
-    """GCSから最新の公開URLを再取得する"""
-    try:
-        from src.drive.uploader import DriveUploader
-
-        gcp_creds = get_gcp_credentials()
-        if not gcp_creds:
-            return None
-
-        uploader = DriveUploader()
-        folder_name = f"video_output_{output_dir.name}"
-        links = uploader.get_file_links(folder_name)
-        if links:
-            st.session_state["cloud_upload_links"] = links
-            _save_cloud_links(output_dir, links)
-            return links
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"リンク更新失敗: {e}")
-    return None
-
-
-def _render_cloud_links_section(upload_links: list[dict]) -> None:
-    """GCSアップロード済みファイルのリンク一覧を表示"""
-    from collections import defaultdict
-
-    total_size = sum(item["size_mb"] for item in upload_links)
-    st.success(f"アップロード完了！ ({len(upload_links)}ファイル / {total_size:.0f}MB)")
-
-    groups: dict[str, list] = defaultdict(list)
-    for item in upload_links:
-        parts = item["name"].split("/")
-        folder = parts[0] if len(parts) > 1 else "その他"
-        groups[folder].append(item)
-
-    folder_icons = {
-        "audio": "🔊 音声", "images": "🖼️ 画像", "videos": "🎬 動画",
-        "bgm": "🎵 BGM", "その他": "📄 その他",
-    }
-
-    for folder, items in groups.items():
-        label = folder_icons.get(folder, f"📁 {folder}")
-        folder_size = sum(i["size_mb"] for i in items)
-        with st.expander(f"{label}（{len(items)}ファイル / {folder_size:.0f}MB）", expanded=False):
-            for item in items:
-                size_str = f"{item['size_mb']:.1f}MB" if item["size_mb"] >= 1 else f"{item['size_mb'] * 1024:.0f}KB"
-                filename = item["name"].split("/")[-1]
-                st.markdown(f"[📥 {filename}]({item['url']})　`{size_str}`")
-
-
-def _render_manual_upload_button(output_dir: Path) -> None:
-    """手動アップロードボタン（GCSリンクがない場合のみ表示）"""
     if st.button("📤 クラウドにアップロード", key="drive_upload_btn"):
         progress_placeholder = st.empty()
         status_placeholder = st.empty()
@@ -2339,61 +2111,37 @@ def _render_manual_upload_button(output_dir: Path) -> None:
             status_placeholder.info("Google Cloud Storage に接続中...")
             uploader.upload_folder(output_dir, folder_name)
 
+            # ファイルリンク一覧を取得
             links = uploader.get_file_links(folder_name)
 
             progress_placeholder.empty()
             status_placeholder.empty()
 
             st.session_state["cloud_upload_links"] = links
-            _save_cloud_links(output_dir, links)
             st.rerun()
         except Exception as e:
             progress_placeholder.empty()
             status_placeholder.error(f"アップロードに失敗しました: {e}")
 
 
+_fragment = getattr(st, "fragment", None)
+
+
 @(_fragment if _fragment else lambda fn: fn)
 def render_download_section(output_dir: Path) -> None:
     """STEP 5: ダウンロードセクション（fragmentで分離）"""
     downloads_dir = output_dir / "_downloads"
-    on_cloud = is_streamlit_cloud()
-
-    # GCSリンクをセッションstateから取得。なければディスクから復元
-    upload_links = st.session_state.get("cloud_upload_links")
-    if not upload_links:
-        upload_links = _load_cloud_links(output_dir)
-        if upload_links:
-            st.session_state["cloud_upload_links"] = upload_links
-
-
-    has_cloud = bool(upload_links)
 
     # ファイル種別ごとのカウント
     audio_files = list((output_dir / "audio").rglob("*")) if (output_dir / "audio").exists() else []
     image_files = list((output_dir / "images").rglob("*")) if (output_dir / "images").exists() else []
     bgm_files = list((output_dir / "bgm").rglob("*")) if (output_dir / "bgm").exists() else []
+    # 完成動画（videos直下のmp4）と素材動画（backgrounds内）を分離
     videos_dir = output_dir / "videos"
     final_videos = [f for f in videos_dir.glob("*.mp4") if f.is_file()] if videos_dir.exists() else []
     bg_videos = list((videos_dir / "backgrounds").rglob("*.mp4")) if (videos_dir / "backgrounds").exists() else []
 
-    # ── セクション1: GCSクラウドリンク（最優先） ──
-    if has_cloud:
-        hdr_col1, hdr_col2 = st.columns([4, 1])
-        with hdr_col1:
-            st.markdown("### ☁️ クラウドからダウンロード")
-        with hdr_col2:
-            if st.button("🔄 リンク更新", key="refresh_cloud_links", help="署名付きURLを再生成（7日有効）"):
-                with st.spinner("リンクを更新中..."):
-                    refreshed = _refresh_cloud_links(output_dir)
-                    if refreshed:
-                        upload_links = refreshed
-                        st.rerun()
-                    else:
-                        st.error("リンク更新失敗")
-        _render_cloud_links_section(upload_links)
-        st.divider()
-
-    # ── セクション2: 完成動画 ──
+    # 完成動画がある場合は目立たせて表示（メモリ節約: 1つずつ準備）
     if final_videos:
         st.markdown("### 🎬 完成動画")
         for fv in final_videos:
@@ -2402,36 +2150,19 @@ def render_download_section(output_dir: Path) -> None:
             with fcol1:
                 st.markdown(f"**{fv.name}** ({fv_size_mb:.0f}MB)")
             with fcol2:
-                if has_cloud:
-                    cloud_url = None
-                    for item in upload_links:
-                        if item["name"].split("/")[-1] == fv.name:
-                            cloud_url = item["url"]
-                            break
-                    if cloud_url:
-                        st.markdown(f"[📥 ダウンロード]({cloud_url})")
-                    else:
-                        st.info("クラウドに見つかりません")
-                elif on_cloud:
-                    # Streamlit Cloud: st.download_button は使わない
-                    st.warning(f"⚠️ {fv_size_mb:.0f}MB — クラウドにアップロードしてください")
-                elif fv_size_mb <= _DOWNLOAD_SIZE_LIMIT_MB:
-                    ready_key = f"ready_final_{fv.name}"
-                    if st.button("📦 準備", key=f"prep_final_{fv.name}"):
-                        st.session_state[ready_key] = True
-                    if st.session_state.get(ready_key) and fv.exists():
-                        st.download_button(
-                            label="📥 ダウンロード",
-                            data=fv.read_bytes(),
-                            file_name=fv.name,
-                            mime="video/mp4",
-                            key=f"dl_final_{fv.name}",
-                        )
-                else:
-                    st.warning(f"⚠️ {fv_size_mb:.0f}MB — クラウドにアップロードしてください")
+                ready_key = f"ready_final_{fv.name}"
+                if st.button("📦 準備", key=f"prep_final_{fv.name}"):
+                    st.session_state[ready_key] = True
+                if st.session_state.get(ready_key) and fv.exists():
+                    st.download_button(
+                        label="📥 ダウンロード",
+                        data=fv.read_bytes(),
+                        file_name=fv.name,
+                        mime="video/mp4",
+                        key=f"dl_final_{fv.name}",
+                    )
         st.divider()
 
-    # ── セクション3: ファイル数サマリー ──
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("🎤 音声", f"{len([f for f in audio_files if f.is_file()])}件")
@@ -2442,79 +2173,111 @@ def render_download_section(output_dir: Path) -> None:
     with col4:
         st.metric("🎬 素材動画", f"{len(bg_videos)}本")
 
-    # ── セクション4: カテゴリ別ダウンロード ──
-    if not has_cloud:
-        st.divider()
+    # Google Drive アップロード
+    _render_drive_upload(output_dir)
 
-        # 手動アップロードボタン
-        st.markdown("### 📤 クラウドにアップロード")
-        _render_manual_upload_button(output_dir)
+    st.divider()
 
-        # Streamlit Cloudではst.download_buttonを使わずGCSアップロードを案内
-        if on_cloud:
-            st.info("Streamlit Cloudでは、GCSにアップロード後にクラウドリンクからダウンロードしてください。")
-        else:
-            st.divider()
+    # カテゴリ別ZIPダウンロード
+    categories = [
+        ("🎤 音声", "audio", [f for f in audio_files if f.is_file()]),
+        ("🖼️ 画像", "images", [f for f in image_files if f.is_file()]),
+        ("🎵 BGM", "bgm", [f for f in bgm_files if f.is_file()]),
+        ("🎬 素材動画", "videos", bg_videos),
+    ]
 
-            categories = [
-                ("🎤 音声", "audio", [f for f in audio_files if f.is_file()]),
-                ("🖼️ 画像", "images", [f for f in image_files if f.is_file()]),
-                ("🎵 BGM", "bgm", [f for f in bgm_files if f.is_file()]),
-                ("🎬 素材動画", "videos", bg_videos),
-            ]
+    MAX_ZIP_MB = 500  # ZIPダウンロード上限(MB) — maxMessageSizeに合わせる
 
-            st.markdown("**カテゴリ別ダウンロード**")
-            dl_cols = st.columns(len(categories))
-            for col, (label, cat_folder_name, files) in zip(dl_cols, categories):
-                with col:
-                    if files:
-                        size_mb = _dir_size_mb(files)
-                        if size_mb > _DOWNLOAD_SIZE_LIMIT_MB:
-                            st.warning(f"{label} {size_mb:.0f}MB — クラウドにアップロードしてください")
-                            continue
-                        zip_path = downloads_dir / f"{cat_folder_name}.zip"
-                        ready_key = f"zip_ready_{cat_folder_name}"
-                        if st.button(f"📦 {label} を準備 ({size_mb:.0f}MB)", key=f"prep_{cat_folder_name}"):
-                            with st.spinner("ZIP作成中..."):
-                                _create_zip_to_disk(files, output_dir, zip_path)
-                            st.session_state[ready_key] = True
-                        if st.session_state.get(ready_key) and zip_path.exists():
-                            zip_size_mb = zip_path.stat().st_size / (1024 * 1024)
-                            st.download_button(
-                                label=f"📥 ダウンロード ({zip_size_mb:.0f}MB)",
-                                data=zip_path.read_bytes(),
-                                file_name=f"{cat_folder_name}_{output_dir.name}.zip",
-                                mime="application/zip",
-                                key=f"dl_{cat_folder_name}",
-                            )
-                    else:
-                        st.button(f"{label} なし", disabled=True, key=f"dl_{cat_folder_name}")
-
-            # 一括ダウンロード（ローカル環境 + 50MB以下のみ）
-            all_output_files = [
-                f for f in output_dir.rglob("*")
-                if f.is_file() and not f.relative_to(output_dir).parts[0].startswith("_")
-            ]
-            total_mb = _dir_size_mb(all_output_files)
-            if total_mb <= _DOWNLOAD_SIZE_LIMIT_MB:
-                zip_path_all = downloads_dir / "all.zip"
-                ready_key_all = "zip_ready_all"
-                download_label = "生成物を一括ダウンロード" if st.session_state.generation_complete else "生成済み素材を一括ダウンロード"
-                if st.button(f"📦 {download_label} を準備 ({total_mb:.0f}MB)", key="prep_all"):
-                    with st.spinner("一括ZIP作成中..."):
-                        _create_zip_to_disk(all_output_files, output_dir, zip_path_all)
-                    st.session_state[ready_key_all] = True
-                if st.session_state.get(ready_key_all) and zip_path_all.exists():
-                    zip_size_mb = zip_path_all.stat().st_size / (1024 * 1024)
+    st.markdown("**カテゴリ別ダウンロード**")
+    dl_cols = st.columns(len(categories))
+    for col, (label, folder_name, files) in zip(dl_cols, categories):
+        with col:
+            if files:
+                size_mb = _dir_size_mb(files)
+                if size_mb > MAX_ZIP_MB:
+                    SPLIT_ZIP_MB = 480  # maxMessageSize(500)に近い上限
+                    num_parts = max(1, int(size_mb / SPLIT_ZIP_MB) + 1)
+                    st.info(f"{label} {size_mb:.0f}MB → {num_parts}個のZIP")
+                    # 分割ZIPダウンロード
+                    split_ready_key = f"split_ready_{folder_name}"
+                    if st.button(f"📦 分割ZIP作成", key=f"prep_split_{folder_name}"):
+                        with st.spinner("分割ZIP作成中..."):
+                            zip_paths = _create_split_zips(files, output_dir, downloads_dir, folder_name, SPLIT_ZIP_MB)
+                        st.session_state[split_ready_key] = [str(p) for p in zip_paths]
+                    split_paths = st.session_state.get(split_ready_key, [])
+                    if split_paths:
+                        existing = [p for p in split_paths if Path(p).exists()]
+                        st.write(f"**全{len(existing)}パート** — 順番にダウンロードしてください")
+                        # パート番号で順次ダウンロード（前へ/次へ方式）
+                        part_key = f"split_part_{folder_name}"
+                        if part_key not in st.session_state:
+                            st.session_state[part_key] = 0
+                        idx = st.session_state[part_key]
+                        idx = min(idx, len(existing) - 1)
+                        nav_cols = st.columns([1, 2, 1])
+                        with nav_cols[0]:
+                            if st.button("◀ 前", key=f"prev_{folder_name}", disabled=(idx == 0)):
+                                st.session_state[part_key] = idx - 1
+                                st.rerun()
+                        with nav_cols[1]:
+                            st.write(f"**Part {idx + 1} / {len(existing)}**")
+                        with nav_cols[2]:
+                            if st.button("次 ▶", key=f"next_{folder_name}", disabled=(idx >= len(existing) - 1)):
+                                st.session_state[part_key] = idx + 1
+                                st.rerun()
+                        sel_path = Path(existing[idx])
+                        sel_size = sel_path.stat().st_size / (1024 * 1024)
+                        st.download_button(
+                            label=f"📥 Part {idx + 1} をダウンロード ({sel_size:.0f}MB)",
+                            data=sel_path.read_bytes(),
+                            file_name=sel_path.name,
+                            mime="application/zip",
+                            key=f"dl_{folder_name}_split",
+                        )
+                    continue
+                zip_path = downloads_dir / f"{folder_name}.zip"
+                ready_key = f"zip_ready_{folder_name}"
+                if st.button(f"📦 {label} を準備 ({size_mb:.0f}MB)", key=f"prep_{folder_name}"):
+                    with st.spinner("ZIP作成中..."):
+                        _create_zip_to_disk(files, output_dir, zip_path)
+                    st.session_state[ready_key] = True
+                if st.session_state.get(ready_key) and zip_path.exists():
+                    zip_size_mb = zip_path.stat().st_size / (1024 * 1024)
                     st.download_button(
-                        label=f"📥 {download_label} ({zip_size_mb:.0f}MB)",
-                        data=zip_path_all.read_bytes(),
-                        file_name=f"video_output_{output_dir.name}.zip",
+                        label=f"📥 ダウンロード ({zip_size_mb:.0f}MB)",
+                        data=zip_path.read_bytes(),
+                        file_name=f"{folder_name}_{output_dir.name}.zip",
                         mime="application/zip",
-                        key="dl_all",
+                        key=f"dl_{folder_name}",
                     )
-            elif total_mb > _DOWNLOAD_SIZE_LIMIT_MB:
-                st.info(f"📦 合計 {total_mb:.0f}MB — クラウドにアップロードしてダウンロードしてください。")
+            else:
+                st.button(f"{label} なし", disabled=True, key=f"dl_{folder_name}")
+
+    # 一括ダウンロード（500MB以下の場合のみ）
+    all_output_files = [
+        f for f in output_dir.rglob("*")
+        if f.is_file() and not f.relative_to(output_dir).parts[0].startswith("_")
+    ]
+    total_mb = _dir_size_mb(all_output_files)
+    if total_mb <= MAX_ZIP_MB:
+        zip_path_all = downloads_dir / "all.zip"
+        ready_key_all = "zip_ready_all"
+        download_label = "生成物を一括ダウンロード" if st.session_state.generation_complete else "生成済み素材を一括ダウンロード"
+        if st.button(f"📦 {download_label} を準備 ({total_mb:.0f}MB)", key="prep_all"):
+            with st.spinner("一括ZIP作成中..."):
+                _create_zip_to_disk(all_output_files, output_dir, zip_path_all)
+            st.session_state[ready_key_all] = True
+        if st.session_state.get(ready_key_all) and zip_path_all.exists():
+            zip_size_mb = zip_path_all.stat().st_size / (1024 * 1024)
+            st.download_button(
+                label=f"📥 {download_label} ({zip_size_mb:.0f}MB)",
+                data=zip_path_all.read_bytes(),
+                file_name=f"video_output_{output_dir.name}.zip",
+                mime="application/zip",
+                key="dl_all",
+            )
+    else:
+        st.info(f"📦 合計 {total_mb:.0f}MB のため、一括ダウンロードは無効です。カテゴリ別にダウンロードしてください。")
 
     # 個別ファイル一覧
     with st.expander("📁 生成ファイル一覧"):
@@ -3504,67 +3267,6 @@ def run_step_timeline(script, prompts, mode: str, output_formats: list, output_d
     return {"success": True, "files": {}, "error": None}
 
 
-def _init_gcs_uploader(output_dir: Path):
-    """GCS Uploaderを初期化（GCP認証がなければNoneを返す）
-
-    Returns:
-        (uploader, folder_name) or (None, None)
-    """
-    try:
-        from src.drive.uploader import DriveUploader
-        gcp_creds = get_gcp_credentials()
-        if gcp_creds:
-            uploader = DriveUploader()
-            folder_name = f"video_output_{output_dir.name}"
-            return uploader, folder_name
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"GCS Uploader初期化失敗: {e}")
-    return None, None
-
-
-def _upload_step_to_gcs(output_dir: Path, subfolder: str, uploader, folder_name: str) -> list[dict]:
-    """ステップ完了後にそのサブフォルダをGCSへ即時アップロード
-
-    失敗しても例外を投げない（ベストエフォート）。
-    アップロード済みリンクをセッションstateとディスクに保存する。
-    """
-    if uploader is None:
-        return []
-
-    target_dir = output_dir / subfolder
-    if not target_dir.exists():
-        return []
-
-    files = [f for f in sorted(target_dir.rglob("*")) if f.is_file()]
-    if not files:
-        return []
-
-    uploaded: list[dict] = []
-    try:
-        for file_path in files:
-            rel_path = str(file_path.relative_to(output_dir))
-            try:
-                link_info = uploader.upload_file(file_path, folder_name, rel_path)
-                uploaded.append(link_info)
-            except Exception as e:
-                logging.getLogger(__name__).warning(f"ステップアップロード失敗（{rel_path}）: {e}")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"ステップアップロード中にエラー（{subfolder}）: {e}")
-
-    if uploaded:
-        # セッションstateに追加（既存リンクとマージ）
-        existing = st.session_state.get("cloud_upload_links", [])
-        by_name = {item["name"]: item for item in existing}
-        for item in uploaded:
-            by_name[item["name"]] = item
-        merged = list(by_name.values())
-        st.session_state["cloud_upload_links"] = merged
-        # ディスクに永続化
-        _save_cloud_links(output_dir, merged)
-
-    return uploaded
-
-
 def run_generation(script, prompts, mode: str, output_formats: list, generate_audio: bool = True, generate_images: bool = True, generate_bgm: bool = False, generate_bg_video: bool = False, use_ai_bg: bool = False, ai_duration: int = 8, ai_max_clips: int = 10, speed_factor: float = 1.0, number_of_videos: int = 1, hybrid: bool = False) -> None:
     """生成処理を実行（全ステップを順番に実行するラッパー）
 
@@ -3634,18 +3336,11 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
 
         overall_progress = st.progress(0)
 
-        # GCS Uploaderを初期化（各ステップ後に即時アップロードするため）
-        gcs_uploader, gcs_folder_name = _init_gcs_uploader(output_dir)
-
         # STEP 1: 音声生成
         if generate_audio:
             run_step_audio(script, output_dir, history_entry)
-        elif st.session_state.reuse_mode["enabled"] and st.session_state.reuse_mode["audio_files"]:
-            # チェックOFFでも再利用素材があればコピー
-            run_step_audio(script, output_dir, history_entry)
         else:
             st.info("⏭️ 音声生成をスキップしました")
-        _upload_step_to_gcs(output_dir, "audio", gcs_uploader, gcs_folder_name)
         overall_progress.progress(0.25)
 
         # ステップ間リソース解放（TTS→次のステップ）
@@ -3670,7 +3365,6 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
                         shutil.copy2(src_bgm, dst_bgm)
                     bgm_result["files"]["bgm"] = str(dst_bgm)
                     st.success(f"♻️ 既存のBGMファイルをコピー: {dst_bgm.name}")
-        _upload_step_to_gcs(output_dir, "bgm", gcs_uploader, gcs_folder_name)
         overall_progress.progress(0.35)
 
         # STEP 3: 背景動画
@@ -3681,11 +3375,8 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
                 use_ai=use_ai_bg, ai_duration=ai_duration, ai_max_clips=ai_max_clips,
                 speed_factor=speed_factor, number_of_videos=number_of_videos, hybrid=hybrid,
             )
-        elif st.session_state.reuse_mode["enabled"] and st.session_state.reuse_mode.get("videos"):
-            bg_result = run_step_bg_video(script, prompts, output_dir, history_entry)
         else:
             st.info("⏭️ 背景動画の取得をスキップしました")
-        _upload_step_to_gcs(output_dir, "videos/backgrounds", gcs_uploader, gcs_folder_name)
         overall_progress.progress(0.5)
 
         # Gemini APIレート制限回復のため待機（TTS/BGM/動画で消費した分）
@@ -3698,11 +3389,8 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
         img_result = {"files": {"images": {}}}
         if generate_images:
             img_result = run_step_images(script, prompts, output_dir, history_entry)
-        elif st.session_state.reuse_mode["enabled"] and st.session_state.reuse_mode.get("images"):
-            img_result = run_step_images(script, prompts, output_dir, history_entry)
         else:
             st.info("⏭️ 画像生成をスキップしました")
-        _upload_step_to_gcs(output_dir, "images", gcs_uploader, gcs_folder_name)
         overall_progress.progress(0.75)
 
         # STEP 5: タイムライン/動画合成
@@ -3715,22 +3403,12 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
             script, prompts, mode, output_formats, output_dir,
             generated_images, background_videos, bgm_path, history_entry,
         )
-        _upload_step_to_gcs(output_dir, "videos", gcs_uploader, gcs_folder_name)
         overall_progress.progress(1.0)
 
-        # 生成完了を先に確定
-        if history_entry:
-            history_entry["status"] = "completed"
-            add_history_entry(history_entry)
+        # 再開モードをリセット
         st.session_state.resume_mode = {"enabled": False, "entry": None}
         st.session_state.current_history_id = None
         st.session_state.generation_complete = True
-
-        # ステップごとアップロード済みのため一括アップロードは不要
-        uploaded_count = len(st.session_state.get("cloud_upload_links", []))
-        if uploaded_count > 0:
-            st.success(f"☁️ {uploaded_count}ファイルをクラウドにアップロード済み")
-
         st.rerun()
 
     except BaseException as e:
@@ -3755,7 +3433,7 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
         st.error(f"❌ 生成エラー: {error_msg}")
         st.code(error_trace)
 
-        if history_entry and history_entry.get("status") != "completed":
+        if history_entry:
             history_entry["status"] = "interrupted"
             history_entry["error"] = error_msg
             history_entry["error_trace"] = error_trace[:500]
@@ -4064,90 +3742,6 @@ def settings_page() -> None:
         st.success("✅ 設定を保存しました！")
 
 
-def cloud_files_page() -> None:
-    """GCSファイルブラウザ — どのPCからでもアップロード済みファイルをダウンロード可能"""
-    st.header("☁️ クラウドファイル")
-    st.caption("Google Cloud Storage にアップロード済みのファイルを参照・ダウンロードできます")
-
-    try:
-        gcp_creds = get_gcp_credentials()
-        if not gcp_creds:
-            st.warning("GCP認証情報が設定されていません。")
-            return
-
-        from src.drive.uploader import GCS_BUCKET_NAME, DriveUploader
-
-        uploader = DriveUploader()
-        client = uploader._get_client()
-        bucket = client.bucket(GCS_BUCKET_NAME)
-
-        # フォルダ一覧を取得（prefix区切り）
-        with st.spinner("フォルダ一覧を取得中..."):
-            iterator = bucket.list_blobs(delimiter="/")
-            # iterator をトリガーしてprefixesを取得
-            _ = list(iterator)  # noqa: F841 — consumes iterator to populate prefixes
-            prefixes = sorted(iterator.prefixes, reverse=True)
-
-        if not prefixes:
-            st.info("アップロード済みのフォルダがありません。")
-            return
-
-        # フォルダ選択
-        folder_options = [p.rstrip("/") for p in prefixes]
-        selected_folder = st.selectbox(
-            "フォルダを選択",
-            folder_options,
-            index=0,
-            help="生成日時のフォルダ名を選択してください",
-        )
-
-        if selected_folder and st.button("📂 ファイル一覧を表示", key="list_gcs_files"):
-            with st.spinner("ファイル一覧を取得中..."):
-                blobs = list(bucket.list_blobs(prefix=f"{selected_folder}/"))
-                files = [b for b in blobs if not b.name.endswith("/")]
-
-            if not files:
-                st.info("このフォルダにファイルはありません。")
-                return
-
-            # カテゴリ別に分類
-            from collections import defaultdict
-            groups: dict[str, list] = defaultdict(list)
-            total_size = 0.0
-            for blob in files:
-                name = blob.name.removeprefix(f"{selected_folder}/")
-                parts = name.split("/")
-                folder = parts[0] if len(parts) > 1 else "その他"
-                size_mb = blob.size / (1024 * 1024) if blob.size else 0
-                total_size += size_mb
-                # 公開バケットなので公開URLを使用（有効期限なし）
-                public_url = f"https://storage.googleapis.com/{GCS_BUCKET_NAME}/{blob.name}"
-                groups[folder].append({
-                    "name": name,
-                    "url": public_url,
-                    "size_mb": size_mb,
-                })
-
-            st.success(f"{len(files)}ファイル（{total_size:.0f}MB）")
-
-            folder_icons = {
-                "audio": "🔊 音声", "images": "🖼️ 画像", "videos": "🎬 動画",
-                "bgm": "🎵 BGM", "その他": "📄 その他",
-            }
-            for folder, items in groups.items():
-                label = folder_icons.get(folder, f"📁 {folder}")
-                folder_size = sum(i["size_mb"] for i in items)
-                with st.expander(f"{label}（{len(items)}ファイル / {folder_size:.0f}MB）"):
-                    for item in items:
-                        filename = item["name"].split("/")[-1]
-                        size_str = f"{item['size_mb']:.1f}MB" if item["size_mb"] >= 1 else f"{item['size_mb'] * 1024:.0f}KB"
-                        st.markdown(f"[📥 {filename}]({item['url']})　`{size_str}`")
-
-    except Exception as e:
-        st.error(f"GCSへの接続に失敗しました: {e}")
-        logging.getLogger(__name__).error(f"GCSブラウザエラー: {e}")
-
-
 def main() -> None:
     """メイン関数"""
     # サイドバーでページ選択
@@ -4157,19 +3751,17 @@ def main() -> None:
 
         page = st.radio(
             "ページを選択",
-            ["🏠 動画生成メイン", "☁️ クラウドファイル", "⚙️ 設定"],
+            ["🏠 動画生成メイン", "⚙️ 設定"],
             label_visibility="collapsed",
         )
 
         st.divider()
-        st.markdown("**バージョン:** 0.2.5")
+        st.markdown("**バージョン:** 0.2.4")
         st.markdown("[📖 ドキュメント](docs/requirements.md)")
 
     # ページルーティング
     if page == "🏠 動画生成メイン":
         main_page()
-    elif page == "☁️ クラウドファイル":
-        cloud_files_page()
     else:
         settings_page()
 
