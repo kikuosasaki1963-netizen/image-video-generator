@@ -1740,10 +1740,12 @@ def main_page() -> None:
                         ai_clips = st.session_state.get("_pending_ai_max_clips", 10)
                         spd = st.session_state.get("_pending_speed_factor", 1.0)
                         nvid = st.session_state.get("_pending_number_of_videos", 1)
+                        _bg_style = st.session_state.get("_pending_bg_style", "自動（台本から推定）")
                         run_step_bg_video(
                             script, prompts, step_output_dir, step_history,
                             use_ai=use_ai, ai_duration=ai_dur, ai_max_clips=ai_clips,
                             speed_factor=spd, number_of_videos=nvid, hybrid=use_hybrid,
+                            bg_style=_bg_style,
                         )
                     elif pending_step == "images":
                         run_step_images(script, prompts, step_output_dir, step_history)
@@ -1799,6 +1801,16 @@ def main_page() -> None:
                     label_visibility="collapsed",
                 )
                 st.session_state._pending_bg_source = bg_source
+            if bg_source in ("ストック", "ハイブリッド"):
+                step_bg_style = st.selectbox(
+                    "背景動画スタイル",
+                    ["自動（台本から推定）", "風景・街並み", "ビジネス・オフィス", "テクノロジー", "自然"],
+                    index=0,
+                    key="step_bg_style_select",
+                )
+                st.session_state._pending_bg_style = step_bg_style
+            else:
+                st.session_state._pending_bg_style = "自動（台本から推定）"
             with s3_col3:
                 s3_label = "🔄 再生成" if step_status["bg_video"] else "▶️ 生成開始"
                 if st.button(s3_label, key="step_bg_video_btn", width="stretch"):
@@ -1894,6 +1906,15 @@ def main_page() -> None:
                     horizontal=True,
                     key="batch_bg_source_radio",
                 )
+                if batch_bg_source in ("ストック", "ハイブリッド"):
+                    batch_bg_style = st.selectbox(
+                        "背景動画スタイル",
+                        ["自動（台本から推定）", "風景・街並み", "ビジネス・オフィス", "テクノロジー", "自然"],
+                        index=0,
+                        key="batch_bg_style_select",
+                    )
+                else:
+                    batch_bg_style = "自動（台本から推定）"
                 if batch_bg_source in ("AI生成", "ハイブリッド"):
                     batch_opt1, batch_opt2 = st.columns(2)
                     with batch_opt1:
@@ -1937,6 +1958,7 @@ def main_page() -> None:
                     batch_number_of_videos = 1
             else:
                 batch_bg_source = "ストック"
+                batch_bg_style = "自動（台本から推定）"
                 batch_ai_duration = 8
                 batch_ai_max_clips = 10
                 batch_speed_factor = 1.0
@@ -1966,6 +1988,7 @@ def main_page() -> None:
                         speed_factor=batch_speed_factor,
                         number_of_videos=batch_number_of_videos,
                         hybrid=use_hybrid_bg,
+                        bg_style=batch_bg_style,
                     )
 
     # STEP 5: 結果ダウンロード
@@ -2607,7 +2630,7 @@ def run_step_bgm(script, prompts, output_dir: Path, history_entry: dict | None =
     return {"success": bgm_path is not None, "files": {"bgm": str(bgm_path) if bgm_path else None}, "error": None}
 
 
-def run_step_bg_video(script, prompts, output_dir: Path, history_entry: dict | None = None, use_ai: bool = False, ai_duration: int = 8, ai_max_clips: int = 10, speed_factor: float = 1.0, number_of_videos: int = 1, hybrid: bool = False) -> dict:
+def run_step_bg_video(script, prompts, output_dir: Path, history_entry: dict | None = None, use_ai: bool = False, ai_duration: int = 8, ai_max_clips: int = 10, speed_factor: float = 1.0, number_of_videos: int = 1, hybrid: bool = False, bg_style: str = "自動（台本から推定）") -> dict:
     """ステップ3: 背景動画取得（AI生成 or ストック素材 or ハイブリッド）"""
     import gc
     import re as _re
@@ -2660,6 +2683,7 @@ def run_step_bg_video(script, prompts, output_dir: Path, history_entry: dict | N
                     stock_videos = _download_stock_videos(
                         script, prompts, video_dir, output_dir, progress, status,
                         target_numbers=uncovered,
+                        bg_style=bg_style,
                     )
                     background_videos.update(stock_videos)
 
@@ -2683,10 +2707,12 @@ def run_step_bg_video(script, prompts, output_dir: Path, history_entry: dict | N
                     st.warning("⚠️ AI動画生成が0件のため、ストック素材にフォールバックします")
                     background_videos = _download_stock_videos(
                         script, prompts, video_dir, output_dir, progress, status,
+                        bg_style=bg_style,
                     )
             else:
                 background_videos = _download_stock_videos(
                     script, prompts, video_dir, output_dir, progress, status,
+                    bg_style=bg_style,
                 )
 
     except Exception as bg_err:
@@ -2845,11 +2871,12 @@ def _generate_ai_videos(script, prompts, video_dir: Path, output_dir: Path, prog
     return background_videos
 
 
-def _download_stock_videos(script, prompts, video_dir: Path, output_dir: Path, progress, status, target_numbers: list[int] | None = None) -> dict:
+def _download_stock_videos(script, prompts, video_dir: Path, output_dir: Path, progress, status, target_numbers: list[int] | None = None, bg_style: str = "自動（台本から推定）") -> dict:
     """ストック素材（Pexels/Pixabay）による背景動画ダウンロード
 
     Args:
         target_numbers: 指定時はそのセグメント番号のみダウンロード（ハイブリッド用）
+        bg_style: 背景動画スタイル（風景・街並み、ビジネス等）
     """
     import re as _re
 
@@ -2857,21 +2884,31 @@ def _download_stock_videos(script, prompts, video_dir: Path, output_dir: Path, p
     status.text("🎥 背景動画を検索中...")
     stock_client = StockVideoClient()
 
+    # スタイルに応じた検索キーワード補足
+    _style_suffix = {
+        "風景・街並み": "cityscape urban landscape aerial",
+        "ビジネス・オフィス": "business office corporate",
+        "テクノロジー": "technology digital modern",
+        "自然": "nature landscape scenic",
+    }
+    style_suffix = _style_suffix.get(bg_style, "")
+
     _jp_to_en = {
-        "不動産": "real estate", "投資": "investment", "マンション": "apartment building",
-        "金利": "interest rate", "経済": "economy", "お金": "money finance",
-        "株": "stock market", "ビジネス": "business office", "会議": "meeting",
-        "グラフ": "chart graph", "上昇": "growth arrow", "下降": "decline",
-        "都市": "city skyline", "建物": "building architecture", "家": "house home",
-        "人": "people", "女性": "woman", "男性": "man", "笑顔": "smile happy",
-        "驚": "surprised", "怒": "angry", "悲": "sad", "喜": "happy celebration",
-        "炎": "fire flame", "水": "water ocean", "空": "sky clouds",
-        "夜": "night city", "朝": "morning sunrise", "自然": "nature landscape",
-        "テクノロジー": "technology", "コンピュータ": "computer", "データ": "data digital",
-        "選挙": "election voting", "政治": "politics government", "ニュース": "news broadcast",
-        "食事": "food dining", "料理": "cooking kitchen", "スーパー": "supermarket shopping",
+        "不動産": "real estate building", "投資": "investment finance", "マンション": "apartment building city",
+        "金利": "interest rate finance", "経済": "economy city", "お金": "money finance",
+        "株": "stock market trading", "ビジネス": "business office", "会議": "meeting conference",
+        "グラフ": "chart graph data", "上昇": "growth upward", "下降": "decline downward",
+        "都市": "city skyline urban", "建物": "building architecture", "家": "house residential",
+        "人": "people walking city", "女性": "woman professional", "男性": "man professional",
+        "笑顔": "happy celebration", "驚": "surprised reaction", "怒": "intense dramatic",
+        "悲": "emotional dramatic", "喜": "celebration success",
+        "炎": "fire dramatic", "水": "water ocean waves", "空": "sky clouds aerial",
+        "夜": "night city lights", "朝": "morning sunrise", "自然": "nature landscape scenic",
+        "テクノロジー": "technology digital", "コンピュータ": "computer technology", "データ": "data digital screen",
+        "選挙": "election government building", "政治": "politics government", "ニュース": "news media broadcast",
+        "食事": "food dining restaurant", "料理": "cooking kitchen", "スーパー": "shopping store",
         "工場": "factory industrial", "半導体": "semiconductor technology",
-        "インフレ": "inflation economy", "価格": "price tag", "給料": "salary paycheck",
+        "インフレ": "inflation economy city", "価格": "shopping price", "給料": "office working",
     }
 
     def _to_english_query(text: str) -> str:
@@ -2879,9 +2916,10 @@ def _download_stock_videos(script, prompts, video_dir: Path, output_dir: Path, p
         for jp, en in _jp_to_en.items():
             if jp in text:
                 matches.append(en)
-        if matches:
-            return " ".join(matches[:3])
-        return "business office background"
+        base = " ".join(matches[:3]) if matches else "business office city"
+        if style_suffix:
+            return f"{base} {style_suffix}"
+        return base
 
     chapter_pattern = _re.compile(r'【[\d:]+〜\s*(.+?)】')
     raw_content = st.session_state.get("prompt_raw_content", "") or st.session_state.get("script_raw_content", "")
@@ -3289,7 +3327,7 @@ def run_step_timeline(script, prompts, mode: str, output_formats: list, output_d
     return {"success": True, "files": {}, "error": None}
 
 
-def run_generation(script, prompts, mode: str, output_formats: list, generate_audio: bool = True, generate_images: bool = True, generate_bgm: bool = False, generate_bg_video: bool = False, use_ai_bg: bool = False, ai_duration: int = 8, ai_max_clips: int = 10, speed_factor: float = 1.0, number_of_videos: int = 1, hybrid: bool = False) -> None:
+def run_generation(script, prompts, mode: str, output_formats: list, generate_audio: bool = True, generate_images: bool = True, generate_bgm: bool = False, generate_bg_video: bool = False, use_ai_bg: bool = False, ai_duration: int = 8, ai_max_clips: int = 10, speed_factor: float = 1.0, number_of_videos: int = 1, hybrid: bool = False, bg_style: str = "自動（台本から推定）") -> None:
     """生成処理を実行（全ステップを順番に実行するラッパー）
 
     Args:
@@ -3303,6 +3341,7 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
         speed_factor: 再生速度倍率（0.25-1.0）
         number_of_videos: 同時生成数（1-4）
         hybrid: ハイブリッドモード（AI+ストック）を使用するかどうか
+        bg_style: 背景動画スタイル
     """
     # デバッグ: 選択されたモードを表示
     materials_info = []
@@ -3396,6 +3435,7 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
                 script, prompts, output_dir, history_entry,
                 use_ai=use_ai_bg, ai_duration=ai_duration, ai_max_clips=ai_max_clips,
                 speed_factor=speed_factor, number_of_videos=number_of_videos, hybrid=hybrid,
+                bg_style=bg_style,
             )
         else:
             st.info("⏭️ 背景動画の取得をスキップしました")
