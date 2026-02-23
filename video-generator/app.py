@@ -2881,7 +2881,7 @@ def _download_stock_videos(script, prompts, video_dir: Path, output_dir: Path, p
                 matches.append(en)
         if matches:
             return " ".join(matches[:3])
-        return "abstract background motion"
+        return "business office background"
 
     chapter_pattern = _re.compile(r'【[\d:]+〜\s*(.+?)】')
     raw_content = st.session_state.get("prompt_raw_content", "") or st.session_state.get("script_raw_content", "")
@@ -2921,24 +2921,38 @@ def _download_stock_videos(script, prompts, video_dir: Path, output_dir: Path, p
         existing_nums = {num for num, _ in search_items}
         for tn in target_numbers:
             if tn not in existing_nums:
-                search_items.append((tn, "abstract background motion"))
+                search_items.append((tn, "business office background"))
 
     for i, (number, search_query) in enumerate(search_items):
         try:
             status.text(f"🎥 背景動画検索中: {i + 1}/{len(search_items)}")
-            videos = stock_client.search_pexels(search_query, per_page=1)
-            if videos:
-                video_path = video_dir / f"{number:03d}_bg.mp4"
-                stock_client.download(videos[0], video_path)
-                background_videos[number] = str(video_path)
-                st.success(f"✅ 背景動画 {number} ダウンロード完了")
-            else:
-                videos = stock_client.search_pixabay(search_query, per_page=1)
-                if videos:
+            downloaded = False
+            # 複数候補から順番にダウンロード試行（サイズ超過時は次の候補へ）
+            videos = stock_client.search_pexels(search_query, per_page=3)
+            for vid in videos:
+                try:
                     video_path = video_dir / f"{number:03d}_bg.mp4"
-                    stock_client.download(videos[0], video_path)
+                    stock_client.download(vid, video_path)
                     background_videos[number] = str(video_path)
-                    st.success(f"✅ 背景動画 {number} ダウンロード完了 (Pixabay)")
+                    st.success(f"✅ 背景動画 {number} ダウンロード完了")
+                    downloaded = True
+                    break
+                except Exception:
+                    continue
+            if not downloaded:
+                videos = stock_client.search_pixabay(search_query, per_page=3)
+                for vid in videos:
+                    try:
+                        video_path = video_dir / f"{number:03d}_bg.mp4"
+                        stock_client.download(vid, video_path)
+                        background_videos[number] = str(video_path)
+                        st.success(f"✅ 背景動画 {number} ダウンロード完了 (Pixabay)")
+                        downloaded = True
+                        break
+                    except Exception:
+                        continue
+            if not downloaded:
+                st.warning(f"⚠️ 背景動画 {number}: 適切なサイズの動画が見つかりません")
         except Exception as vid_err:
             log_error_to_file(output_dir, f"背景動画取得エラー（{number}）", str(vid_err), traceback.format_exc())
             st.warning(f"⚠️ 背景動画取得エラー（{number}）: {vid_err}")

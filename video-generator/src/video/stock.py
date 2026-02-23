@@ -22,6 +22,13 @@ BASE_DELAY = 1.0
 SEARCH_TIMEOUT = 30
 DOWNLOAD_TIMEOUT = 120
 
+# ファイルサイズ上限（MB）— これを超える動画はスキップ
+MAX_VIDEO_FILE_MB = 50
+
+# 希望する解像度幅の範囲
+_TARGET_WIDTH_MIN = 1280  # 最低HD
+_TARGET_WIDTH_MAX = 1920  # 最大FHD（4Kは不要、ファイルサイズが大きすぎる）
+
 
 @dataclass
 class StockVideo:
@@ -34,6 +41,38 @@ class StockVideo:
     width: int
     height: int
     duration: int
+
+
+def _pick_best_pexels_file(video_files: list[dict]) -> dict | None:
+    """Pexelsの動画ファイルリストから最適なファイルを選択
+
+    4K（巨大ファイル）を避け、HD〜FHD範囲の最高品質を選ぶ。
+    """
+    # HD〜FHD範囲のファイルを優先
+    preferred = [
+        f for f in video_files
+        if f.get("width", 0) >= _TARGET_WIDTH_MIN
+        and f.get("width", 0) <= _TARGET_WIDTH_MAX
+        and f.get("link")
+    ]
+    if preferred:
+        return max(preferred, key=lambda x: x.get("width", 0))
+
+    # FHD範囲になければ、_TARGET_WIDTH_MAX以下で最大のものを選択
+    smaller = [
+        f for f in video_files
+        if f.get("width", 0) <= _TARGET_WIDTH_MAX
+        and f.get("link")
+    ]
+    if smaller:
+        return max(smaller, key=lambda x: x.get("width", 0))
+
+    # それでもなければ最小のものを選択（4Kしかない場合）
+    valid = [f for f in video_files if f.get("link")]
+    if valid:
+        return min(valid, key=lambda x: x.get("width", 0))
+
+    return None
 
 
 class StockVideoClient:
@@ -93,6 +132,7 @@ class StockVideoClient:
                 "query": query,
                 "per_page": per_page,
                 "orientation": orientation,
+                "size": "medium",
             }
 
             logger.debug("Pexels検索: query=%s", query)
@@ -112,8 +152,10 @@ class StockVideoClient:
                 if not video_files:
                     continue
 
-                # 最高品質のファイルを選択
-                best_file = max(video_files, key=lambda x: x.get("width", 0))
+                # HD〜FHD範囲の最適ファイルを選択（4K巨大ファイルを回避）
+                best_file = _pick_best_pexels_file(video_files)
+                if not best_file:
+                    continue
 
                 videos.append(
                     StockVideo(
@@ -189,19 +231,22 @@ class StockVideoClient:
             videos = []
             for hit in data.get("hits", []):
                 videos_data = hit.get("videos", {})
-                large = videos_data.get("large", {})
-
-                if not large.get("url"):
+                # "medium"を優先（"large"は巨大すぎる）
+                medium = videos_data.get("medium", {})
+                if not medium.get("url"):
+                    # mediumがなければlargeにフォールバック
+                    medium = videos_data.get("large", {})
+                if not medium.get("url"):
                     continue
 
                 videos.append(
                     StockVideo(
                         id=str(hit["id"]),
-                        url=large["url"],
+                        url=medium["url"],
                         preview_url=hit.get("userImageURL", ""),
                         source="pixabay",
-                        width=large.get("width", 0),
-                        height=large.get("height", 0),
+                        width=medium.get("width", 0),
+                        height=medium.get("height", 0),
                         duration=hit.get("duration", 0),
                     )
                 )
@@ -249,13 +294,44 @@ class StockVideoClient:
             )
             response.raise_for_status()
 
+            # Content-Lengthでサイズ事前チェック
+            content_length = response.headers.get("Content-Length")
+            if content_length:
+                size_mb = int(content_length) / (1024 * 1024)
+                if size_mb > MAX_VIDEO_FILE_MB:
+                    logger.warning(
+                        "動画サイズ超過（%.0fMB > %dMB上限）スキップ: %s",
+                        size_mb, MAX_VIDEO_FILE_MB, video.id,
+                    )
+                    raise StockVideoError(
+                        f"動画サイズが上限を超過 ({size_mb:.0f}MB > {MAX_VIDEO_FILE_MB}MB)",
+                        source=video.source,
+                    )
+
+            downloaded_bytes = 0
             with open(output_path, "wb") as f:
                 for chunk in response.iter_content(chunk_size=8192):
+                    downloaded_bytes += len(chunk)
+                    # ストリーミング中のサイズチェック
+                    if downloaded_bytes > MAX_VIDEO_FILE_MB * 1024 * 1024:
+                        f.close()
+                        output_path.unlink(missing_ok=True)
+                        logger.warning(
+                            "ダウンロード中にサイズ超過（%dMB上限）中断: %s",
+                            MAX_VIDEO_FILE_MB, video.id,
+                        )
+                        raise StockVideoError(
+                            f"ダウンロード中にサイズ上限超過 ({MAX_VIDEO_FILE_MB}MB)",
+                            source=video.source,
+                        )
                     f.write(chunk)
 
-            logger.info("動画ダウンロード完了: %s", output_path)
+            final_mb = downloaded_bytes / (1024 * 1024)
+            logger.info("動画ダウンロード完了: %s (%.1fMB)", output_path, final_mb)
             return output_path
 
+        except StockVideoError:
+            raise
         except requests.exceptions.RequestException as e:
             error_msg = f"動画のダウンロードに失敗 (id={video.id}): {e}"
             logger.error(error_msg)
