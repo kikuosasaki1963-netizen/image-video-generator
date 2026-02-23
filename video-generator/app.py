@@ -1071,8 +1071,22 @@ def main_page() -> None:
                             if h_upload_links:
                                 st.session_state["cloud_upload_links"] = h_upload_links
 
+                        # 古いリンク形式を自動更新
+                        if h_upload_links and _is_links_stale(h_upload_links):
+                            refreshed = _refresh_cloud_links(folder_path)
+                            if refreshed:
+                                h_upload_links = refreshed
+
                         if h_upload_links:
-                            st.markdown("☁️ **クラウドからダウンロード:**")
+                            hd_col1, hd_col2 = st.columns([4, 1])
+                            with hd_col1:
+                                st.markdown("☁️ **クラウドからダウンロード:**")
+                            with hd_col2:
+                                if st.button("🔄 更新", key=f"refresh_{entry['id']}", help="リンクを再生成"):
+                                    refreshed = _refresh_cloud_links(folder_path)
+                                    if refreshed:
+                                        h_upload_links = refreshed
+                                        st.rerun()
                             for item in h_upload_links:
                                 filename = item["name"].split("/")[-1]
                                 size_str = f"{item['size_mb']:.1f}MB" if item["size_mb"] >= 1 else f"{item['size_mb'] * 1024:.0f}KB"
@@ -2261,6 +2275,36 @@ def _load_cloud_links(output_dir: Path) -> list[dict] | None:
     return None
 
 
+def _is_links_stale(links: list[dict]) -> bool:
+    """GCSリンクが古い形式（public_url）か期限切れの可能性があるかチェック"""
+    if not links:
+        return True
+    # 署名付きURLは "X-Goog-Signature" パラメータを含む
+    sample_url = links[0].get("url", "")
+    return "X-Goog-Signature" not in sample_url
+
+
+def _refresh_cloud_links(output_dir: Path) -> list[dict] | None:
+    """GCSから最新の署名付きURLを再生成する"""
+    try:
+        from src.drive.uploader import DriveUploader
+
+        gcp_creds = get_gcp_credentials()
+        if not gcp_creds:
+            return None
+
+        uploader = DriveUploader()
+        folder_name = f"video_output_{output_dir.name}"
+        links = uploader.get_file_links(folder_name)
+        if links:
+            st.session_state["cloud_upload_links"] = links
+            _save_cloud_links(output_dir, links)
+            return links
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"リンク更新失敗: {e}")
+    return None
+
+
 def _render_cloud_links_section(upload_links: list[dict]) -> None:
     """GCSアップロード済みファイルのリンク一覧を表示"""
     from collections import defaultdict
@@ -2335,6 +2379,13 @@ def render_download_section(output_dir: Path) -> None:
         upload_links = _load_cloud_links(output_dir)
         if upload_links:
             st.session_state["cloud_upload_links"] = upload_links
+
+    # リンクが古い形式（public_url）の場合、自動的に署名付きURLへ更新
+    if upload_links and _is_links_stale(upload_links):
+        refreshed = _refresh_cloud_links(output_dir)
+        if refreshed:
+            upload_links = refreshed
+
     has_cloud = bool(upload_links)
 
     # ファイル種別ごとのカウント
@@ -2347,7 +2398,18 @@ def render_download_section(output_dir: Path) -> None:
 
     # ── セクション1: GCSクラウドリンク（最優先） ──
     if has_cloud:
-        st.markdown("### ☁️ クラウドからダウンロード")
+        hdr_col1, hdr_col2 = st.columns([4, 1])
+        with hdr_col1:
+            st.markdown("### ☁️ クラウドからダウンロード")
+        with hdr_col2:
+            if st.button("🔄 リンク更新", key="refresh_cloud_links", help="署名付きURLを再生成（7日有効）"):
+                with st.spinner("リンクを更新中..."):
+                    refreshed = _refresh_cloud_links(output_dir)
+                    if refreshed:
+                        upload_links = refreshed
+                        st.rerun()
+                    else:
+                        st.error("リンク更新失敗")
         _render_cloud_links_section(upload_links)
         st.divider()
 
