@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from src.parser.script import Script
 
-from src.utils.config import get_env_var, get_gcp_credentials, load_settings
+from src.utils.config import get_env_var, get_gcp_credentials, load_pronunciation_dict, load_settings
 from src.utils.exceptions import ConfigurationError, TTSError
 from src.utils.retry import with_retry
 
@@ -50,6 +50,7 @@ class TTSClient:
         self._cloud_client = None
         self._gemini_client = None
         self._settings = load_settings()
+        self._pronunciation_dict: dict[str, str] | None = None  # 遅延読み込み
 
     def _get_cloud_client(self):
         """Google Cloud TTS クライアントを遅延初期化"""
@@ -103,6 +104,37 @@ class TTSClient:
             except Exception as e:
                 raise TTSError(f"Gemini TTS の初期化に失敗: {e}", original_error=e)
         return self._gemini_client
+
+    def _get_pronunciation_dict(self) -> dict[str, str]:
+        """読み辞書を取得（遅延読み込み・キー長降順ソート済み）"""
+        if self._pronunciation_dict is None:
+            raw = load_pronunciation_dict()
+            # キーの長い順にソート（「高市早苗」→「高市」の順でマッチ）
+            self._pronunciation_dict = dict(
+                sorted(raw.items(), key=lambda item: len(item[0]), reverse=True)
+            )
+            if self._pronunciation_dict:
+                logger.info("読み辞書を読み込みました（%d件）", len(self._pronunciation_dict))
+        return self._pronunciation_dict
+
+    def _apply_pronunciation_dict(self, text: str) -> str:
+        """テキストに読み辞書を適用する
+
+        Args:
+            text: 元のテキスト
+
+        Returns:
+            読み変換後のテキスト
+        """
+        pdict = self._get_pronunciation_dict()
+        if not pdict:
+            return text
+
+        for original, reading in pdict.items():
+            if original in text:
+                text = text.replace(original, reading)
+                logger.debug("読み辞書適用: %s → %s", original, reading)
+        return text
 
     def get_voice_config(self, speaker: str) -> VoiceConfig:
         """話者の音声設定を取得"""
@@ -160,10 +192,13 @@ class TTSClient:
             client = self._get_cloud_client()
             voice_config = self.get_voice_config(speaker)
 
+            # 読み辞書を適用
+            text_for_tts = self._apply_pronunciation_dict(text)
+
             logger.info("Google Cloud TTS 音声合成開始: speaker=%s, voice=%s",
                        speaker, voice_config.voice_name)
 
-            synthesis_input = texttospeech.SynthesisInput(text=text)
+            synthesis_input = texttospeech.SynthesisInput(text=text_for_tts)
 
             voice = texttospeech.VoiceSelectionParams(
                 language_code=voice_config.language_code,
@@ -215,9 +250,12 @@ class TTSClient:
 
             logger.info("Gemini TTS 音声合成開始: speaker=%s, voice=%s", speaker, voice_name)
 
+            # 読み辞書を適用
+            text_for_tts = self._apply_pronunciation_dict(text)
+
             # TTS専用プロンプト - テキストをそのまま音声化することを明示
             # 「Say:」プレフィックスでテキスト生成ではなく音声生成であることを明確化
-            expressive_prompt = f"Say: {text}"
+            expressive_prompt = f"Say: {text_for_tts}"
 
             # Pro モデルを優先（クォータ別枠）、失敗時はFlashモデル
             # 注: APIモデル名は "preview" 付き
