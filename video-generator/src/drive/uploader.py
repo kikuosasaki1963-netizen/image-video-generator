@@ -1,12 +1,11 @@
 """Google Cloud Storage アップロード機能
 
 サービスアカウントはGoogle Driveにストレージクォータがないため、
-GCSバケットにアップロードし、署名付きURLを生成する。
+GCSバケットにアップロードし、公開URLでダウンロードさせる。
 """
 
 from __future__ import annotations
 
-import datetime
 import logging
 import mimetypes
 import time
@@ -23,7 +22,6 @@ GCS_SCOPE = "https://www.googleapis.com/auth/devstorage.read_write"
 
 _MAX_RETRIES = 2
 _BACKOFF_BASE = 5  # seconds
-_SIGNED_URL_EXPIRY_DAYS = 7  # 署名付きURLの有効期限
 
 
 def _calc_timeout(file_path: Path) -> int:
@@ -74,13 +72,10 @@ class DriveUploader:
         except Exception as e:
             raise DriveUploadError(f"GCS の初期化に失敗: {e}", original_error=e) from e
 
-    def _generate_signed_url(self, blob) -> str:
-        """署名付きURLを生成（認証不要でブラウザからダウンロード可能）"""
-        return blob.generate_signed_url(
-            version="v4",
-            expiration=datetime.timedelta(days=_SIGNED_URL_EXPIRY_DAYS),
-            method="GET",
-        )
+    @staticmethod
+    def _public_url(blob) -> str:
+        """公開URLを返す（バケットがallUsersに公開設定済み前提、有効期限なし）"""
+        return f"https://storage.googleapis.com/{GCS_BUCKET_NAME}/{blob.name}"
 
     def upload_file(self, file_path: Path, folder_name: str, rel_path: str | None = None) -> dict[str, str]:
         """単一ファイルをGCSにアップロード（timeout/retry付き）
@@ -111,10 +106,10 @@ class DriveUploader:
                     timeout=timeout,
                 )
                 size_mb = file_path.stat().st_size / (1024 * 1024)
-                signed_url = self._generate_signed_url(blob)
+                public_url = self._public_url(blob)
                 link_info = {
                     "name": blob_rel,
-                    "url": signed_url,
+                    "url": public_url,
                     "size_mb": size_mb,
                 }
                 logger.debug(f"アップロード成功: {blob_name} (attempt {attempt + 1})")
@@ -186,10 +181,10 @@ class DriveUploader:
                 if blob.name.endswith("/"):
                     continue
                 name = blob.name.removeprefix(f"{folder_name}/")
-                signed_url = self._generate_signed_url(blob)
+                public_url = self._public_url(blob)
                 links.append({
                     "name": name,
-                    "url": signed_url,
+                    "url": public_url,
                     "size_mb": blob.size / (1024 * 1024) if blob.size else 0,
                 })
             if links:

@@ -1071,12 +1071,6 @@ def main_page() -> None:
                             if h_upload_links:
                                 st.session_state["cloud_upload_links"] = h_upload_links
 
-                        # 古いリンク形式を自動更新
-                        if h_upload_links and _is_links_stale(h_upload_links):
-                            refreshed = _refresh_cloud_links(folder_path)
-                            if refreshed:
-                                h_upload_links = refreshed
-
                         if h_upload_links:
                             hd_col1, hd_col2 = st.columns([4, 1])
                             with hd_col1:
@@ -2275,17 +2269,8 @@ def _load_cloud_links(output_dir: Path) -> list[dict] | None:
     return None
 
 
-def _is_links_stale(links: list[dict]) -> bool:
-    """GCSリンクが古い形式（public_url）か期限切れの可能性があるかチェック"""
-    if not links:
-        return True
-    # 署名付きURLは "X-Goog-Signature" パラメータを含む
-    sample_url = links[0].get("url", "")
-    return "X-Goog-Signature" not in sample_url
-
-
 def _refresh_cloud_links(output_dir: Path) -> list[dict] | None:
-    """GCSから最新の署名付きURLを再生成する"""
+    """GCSから最新の公開URLを再取得する"""
     try:
         from src.drive.uploader import DriveUploader
 
@@ -2380,11 +2365,6 @@ def render_download_section(output_dir: Path) -> None:
         if upload_links:
             st.session_state["cloud_upload_links"] = upload_links
 
-    # リンクが古い形式（public_url）の場合、自動的に署名付きURLへ更新
-    if upload_links and _is_links_stale(upload_links):
-        refreshed = _refresh_cloud_links(output_dir)
-        if refreshed:
-            upload_links = refreshed
 
     has_cloud = bool(upload_links)
 
@@ -4084,6 +4064,90 @@ def settings_page() -> None:
         st.success("✅ 設定を保存しました！")
 
 
+def cloud_files_page() -> None:
+    """GCSファイルブラウザ — どのPCからでもアップロード済みファイルをダウンロード可能"""
+    st.header("☁️ クラウドファイル")
+    st.caption("Google Cloud Storage にアップロード済みのファイルを参照・ダウンロードできます")
+
+    try:
+        gcp_creds = get_gcp_credentials()
+        if not gcp_creds:
+            st.warning("GCP認証情報が設定されていません。")
+            return
+
+        from src.drive.uploader import GCS_BUCKET_NAME, DriveUploader
+
+        uploader = DriveUploader()
+        client = uploader._get_client()
+        bucket = client.bucket(GCS_BUCKET_NAME)
+
+        # フォルダ一覧を取得（prefix区切り）
+        with st.spinner("フォルダ一覧を取得中..."):
+            iterator = bucket.list_blobs(delimiter="/")
+            # iterator をトリガーしてprefixesを取得
+            _ = list(iterator)  # noqa: F841 — consumes iterator to populate prefixes
+            prefixes = sorted(iterator.prefixes, reverse=True)
+
+        if not prefixes:
+            st.info("アップロード済みのフォルダがありません。")
+            return
+
+        # フォルダ選択
+        folder_options = [p.rstrip("/") for p in prefixes]
+        selected_folder = st.selectbox(
+            "フォルダを選択",
+            folder_options,
+            index=0,
+            help="生成日時のフォルダ名を選択してください",
+        )
+
+        if selected_folder and st.button("📂 ファイル一覧を表示", key="list_gcs_files"):
+            with st.spinner("ファイル一覧を取得中..."):
+                blobs = list(bucket.list_blobs(prefix=f"{selected_folder}/"))
+                files = [b for b in blobs if not b.name.endswith("/")]
+
+            if not files:
+                st.info("このフォルダにファイルはありません。")
+                return
+
+            # カテゴリ別に分類
+            from collections import defaultdict
+            groups: dict[str, list] = defaultdict(list)
+            total_size = 0.0
+            for blob in files:
+                name = blob.name.removeprefix(f"{selected_folder}/")
+                parts = name.split("/")
+                folder = parts[0] if len(parts) > 1 else "その他"
+                size_mb = blob.size / (1024 * 1024) if blob.size else 0
+                total_size += size_mb
+                # 公開バケットなので公開URLを使用（有効期限なし）
+                public_url = f"https://storage.googleapis.com/{GCS_BUCKET_NAME}/{blob.name}"
+                groups[folder].append({
+                    "name": name,
+                    "url": public_url,
+                    "size_mb": size_mb,
+                })
+
+            st.success(f"{len(files)}ファイル（{total_size:.0f}MB）")
+
+            folder_icons = {
+                "audio": "🔊 音声", "images": "🖼️ 画像", "videos": "🎬 動画",
+                "bgm": "🎵 BGM", "その他": "📄 その他",
+            }
+            for folder, items in groups.items():
+                label = folder_icons.get(folder, f"📁 {folder}")
+                folder_size = sum(i["size_mb"] for i in items)
+                with st.expander(f"{label}（{len(items)}ファイル / {folder_size:.0f}MB）"):
+                    for item in items:
+                        filename = item["name"].split("/")[-1]
+                        size_str = f"{item['size_mb']:.1f}MB" if item["size_mb"] >= 1 else f"{item['size_mb'] * 1024:.0f}KB"
+                        st.markdown(f"[📥 {filename}]({item['url']})　`{size_str}`")
+
+    except Exception as e:
+        st.error(f"GCSへの接続に失敗しました: {e}")
+        logger.error(f"GCSブラウザエラー: {e}")
+
+
 def main() -> None:
     """メイン関数"""
     # サイドバーでページ選択
@@ -4093,17 +4157,19 @@ def main() -> None:
 
         page = st.radio(
             "ページを選択",
-            ["🏠 動画生成メイン", "⚙️ 設定"],
+            ["🏠 動画生成メイン", "☁️ クラウドファイル", "⚙️ 設定"],
             label_visibility="collapsed",
         )
 
         st.divider()
-        st.markdown("**バージョン:** 0.2.4")
+        st.markdown("**バージョン:** 0.2.5")
         st.markdown("[📖 ドキュメント](docs/requirements.md)")
 
     # ページルーティング
     if page == "🏠 動画生成メイン":
         main_page()
+    elif page == "☁️ クラウドファイル":
+        cloud_files_page()
     else:
         settings_page()
 
