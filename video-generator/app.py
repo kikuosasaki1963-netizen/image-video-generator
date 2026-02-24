@@ -3885,8 +3885,37 @@ def cloud_files_page() -> None:
         logging.getLogger(__name__).error(f"GCSブラウザエラー: {e}")
 
 
+def _inject_keep_alive() -> None:
+    """Streamlit Cloudでセッション維持用のJavaScriptを注入
+
+    ブラウザタブが開いている間、定期的に軽量なリクエストを送信し
+    WebSocket接続の切断・アプリスリープを防止する。
+    """
+    import streamlit.components.v1 as components
+
+    components.html(
+        """
+        <script>
+        (function() {
+            // 4分ごとにStreamlitサーバーへpingを送信（タイムアウト=5分を回避）
+            var INTERVAL_MS = 4 * 60 * 1000;
+            if (window._keepAliveId) clearInterval(window._keepAliveId);
+            window._keepAliveId = setInterval(function() {
+                fetch(window.location.href, {method: 'HEAD', cache: 'no-store'}).catch(function(){});
+            }, INTERVAL_MS);
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+
 def main() -> None:
     """メイン関数"""
+    # Streamlit Cloudでのセッション維持
+    if is_streamlit_cloud():
+        _inject_keep_alive()
+
     # サイドバーでページ選択
     with st.sidebar:
         st.title("🎬 動画生成")
