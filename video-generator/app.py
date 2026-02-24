@@ -3804,6 +3804,35 @@ def settings_page() -> None:
         st.success("✅ 設定を保存しました！")
 
 
+def _bulk_download_js(urls_and_names: list[dict[str, str]]) -> None:
+    """JavaScriptで複数ファイルを順次ダウンロード（ブラウザのブロック回避のため間隔を空ける）"""
+    import streamlit.components.v1 as components
+
+    js_array = json.dumps(urls_and_names, ensure_ascii=False)
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            var files = {js_array};
+            var delay = 800;  // 800msごとにダウンロード開始
+            files.forEach(function(f, i) {{
+                setTimeout(function() {{
+                    var a = document.createElement('a');
+                    a.href = f.url;
+                    a.download = f.name;
+                    a.style.display = 'none';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                }}, i * delay);
+            }});
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
+
 def cloud_files_page() -> None:
     """GCSファイルブラウザ — どのPCからでもアップロード済みファイルをダウンロード可能"""
     st.header("☁️ クラウドファイル")
@@ -3851,6 +3880,7 @@ def cloud_files_page() -> None:
 
             from collections import defaultdict
             groups: dict[str, list] = defaultdict(list)
+            all_files: list[dict[str, str]] = []
             total_size = 0.0
             for blob in files:
                 name = blob.name.removeprefix(f"{selected_folder}/")
@@ -3859,14 +3889,43 @@ def cloud_files_page() -> None:
                 size_mb = blob.size / (1024 * 1024) if blob.size else 0
                 total_size += size_mb
                 public_url = f"https://storage.googleapis.com/{GCS_BUCKET_NAME}/{blob.name}"
-                groups[folder].append({
+                file_info = {
                     "name": name,
                     "url": public_url,
                     "size_mb": size_mb,
-                })
+                    "folder": folder,
+                }
+                groups[folder].append(file_info)
+                all_files.append(file_info)
 
             st.success(f"{len(files)}ファイル（{total_size:.0f}MB）")
 
+            # --- 一括操作 ---
+            dl_col1, dl_col2 = st.columns(2)
+            with dl_col1:
+                if st.button("📥 全ファイルを一括ダウンロード", key="bulk_dl_all", type="primary"):
+                    st.session_state["_bulk_dl_targets"] = [
+                        {"url": f["url"], "name": f["name"].split("/")[-1]} for f in all_files
+                    ]
+            with dl_col2:
+                all_urls = "\n".join(f["url"] for f in all_files)
+                st.download_button(
+                    "📋 全URLをコピー用テキストで保存",
+                    data=all_urls,
+                    file_name=f"{selected_folder}_urls.txt",
+                    mime="text/plain",
+                    key="copy_all_urls",
+                )
+
+            # 一括ダウンロード実行（ボタン押下後のrerunで発火）
+            if st.session_state.get("_bulk_dl_targets"):
+                targets = st.session_state.pop("_bulk_dl_targets")
+                st.info(f"{len(targets)}ファイルのダウンロードを開始します...")
+                _bulk_download_js(targets)
+
+            st.divider()
+
+            # --- カテゴリ別表示 ---
             folder_icons = {
                 "audio": "🔊 音声", "images": "🖼️ 画像", "videos": "🎬 動画",
                 "bgm": "🎵 BGM", "その他": "📄 その他",
@@ -3875,6 +3934,17 @@ def cloud_files_page() -> None:
                 label = folder_icons.get(gcs_folder, f"📁 {gcs_folder}")
                 folder_size = sum(i["size_mb"] for i in items)
                 with st.expander(f"{label}（{len(items)}ファイル / {folder_size:.0f}MB）"):
+                    # カテゴリ別一括ダウンロード
+                    if st.button(f"📥 {label}を一括ダウンロード", key=f"bulk_dl_{gcs_folder}"):
+                        st.session_state[f"_bulk_dl_{gcs_folder}"] = [
+                            {"url": i["url"], "name": i["name"].split("/")[-1]} for i in items
+                        ]
+
+                    if st.session_state.get(f"_bulk_dl_{gcs_folder}"):
+                        targets = st.session_state.pop(f"_bulk_dl_{gcs_folder}")
+                        st.info(f"{len(targets)}ファイルのダウンロードを開始します...")
+                        _bulk_download_js(targets)
+
                     for item in items:
                         filename = item["name"].split("/")[-1]
                         size_str = f"{item['size_mb']:.1f}MB" if item["size_mb"] >= 1 else f"{item['size_mb'] * 1024:.0f}KB"
