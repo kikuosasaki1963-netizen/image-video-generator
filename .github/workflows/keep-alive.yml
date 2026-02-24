@@ -22,12 +22,12 @@ jobs:
 
           # 最大3回リトライ（デプロイ直後やスリープ復帰には時間がかかるため）
           for i in 1 2 3; do
-            HTTP_CODE=$(curl -sL -o /dev/null -w "%{http_code}" --max-time 120 "$APP_URL" || echo "000")
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 120 "$APP_URL" 2>/dev/null) || HTTP_CODE="000"
             echo "Attempt $i: HTTP $HTTP_CODE"
-            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "302" ]; then
-              echo "App is alive!"
-              exit 0
-            fi
+            # 200/302/303 はすべて正常（Streamlit Cloudはリダイレクトで応答する）
+            case "$HTTP_CODE" in
+              200|301|302|303) echo "App is alive!"; exit 0 ;;
+            esac
             echo "Waiting 60s before retry..."
             sleep 60
           done
