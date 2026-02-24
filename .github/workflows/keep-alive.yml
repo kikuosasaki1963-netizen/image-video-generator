@@ -2,9 +2,13 @@ name: Keep Streamlit Cloud Alive
 
 on:
   schedule:
-    # 5分ごとにping
-    - cron: "*/5 * * * *"
-  workflow_dispatch: # 手動実行も可能
+    # 3時間ごとに実行（スリープ防止）
+    - cron: "0 */3 * * *"
+  # コードプッシュ後にも実行（デプロイ後の起動を促進）
+  push:
+    branches: [main]
+  # 手動実行も可能
+  workflow_dispatch:
 
 jobs:
   ping:
@@ -13,28 +17,20 @@ jobs:
     steps:
       - name: Wake up Streamlit app
         run: |
-          APP_URL="${{ secrets.STREAMLIT_APP_URL }}"
-          if [ -z "$APP_URL" ]; then
-            echo "::warning::STREAMLIT_APP_URL secret is not set."
-            exit 0
-          fi
+          APP_URL="https://video-creatorapp-idg69u.streamlit.app/"
+          echo "Pinging $APP_URL ..."
 
-          # リダイレクトを追従（-L）し、スリープ解除を待つ
-          echo "Waking up: $APP_URL"
-          # 1回目: リダイレクト追従でアプリを起動させる
-          HTTP_CODE=$(curl -sL -o /dev/null -w "%{http_code}" --max-time 60 "$APP_URL" || echo "000")
-          echo "First request: HTTP $HTTP_CODE"
+          # 最大3回リトライ（デプロイ直後やスリープ復帰には時間がかかるため）
+          for i in 1 2 3; do
+            HTTP_CODE=$(curl -sL -o /dev/null -w "%{http_code}" --max-time 120 "$APP_URL" || echo "000")
+            echo "Attempt $i: HTTP $HTTP_CODE"
+            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "302" ]; then
+              echo "App is alive!"
+              exit 0
+            fi
+            echo "Waiting 60s before retry..."
+            sleep 60
+          done
 
-          # スリープからの起動には時間がかかるため、200以外なら待機してリトライ
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "App may be waking up, waiting 30 seconds..."
-            sleep 30
-            HTTP_CODE=$(curl -sL -o /dev/null -w "%{http_code}" --max-time 60 "$APP_URL" || echo "000")
-            echo "Second request: HTTP $HTTP_CODE"
-          fi
-
-          if [ "$HTTP_CODE" = "200" ]; then
-            echo "App is alive"
-          else
-            echo "::warning::App returned HTTP $HTTP_CODE (may still be booting)"
-          fi
+          echo "::warning::App returned HTTP $HTTP_CODE after 3 attempts (may still be booting)"
+          exit 0
