@@ -1,0 +1,37 @@
+name: Keep Streamlit App Alive
+
+on:
+  schedule:
+    # 3時間ごとに実行（UTC: 0,3,6,9,12,15,18,21時）
+    - cron: "0 */3 * * *"
+  # コードプッシュ後にも実行（デプロイ後の起動を促進）
+  push:
+    branches: [main]
+  # 手動実行も可能
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping Streamlit App
+        run: |
+          APP_URL="https://video-creatorapp-idg69u.streamlit.app/"
+          echo "Pinging $APP_URL ..."
+
+          # 最大3回リトライ（デプロイ直後は起動に時間がかかるため）
+          for i in 1 2 3; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 120 "$APP_URL" || echo "000")
+            echo "Attempt $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ] || [ "$STATUS" = "302" ]; then
+              echo "App is alive!"
+              exit 0
+            fi
+            echo "Waiting 60s before retry..."
+            sleep 60
+          done
+
+          echo "Warning: App may still be waking up (status: $STATUS)"
+          # 失敗してもworkflowは成功扱い（通知ノイズ防止）
+          exit 0
