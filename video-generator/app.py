@@ -3034,22 +3034,40 @@ def run_step_images(script, prompts, output_dir: Path, history_entry: dict | Non
     status = st.empty()
 
     try:
-        # 再利用モード
+        # ディスク上の既存画像を直接スキャン（中断後の再開時に確実に検出）
+        image_dir = output_dir / "images"
+        if image_dir.exists():
+            for ext in ("*.png", "*.jpg", "*.jpeg"):
+                for image_file in image_dir.glob(ext):
+                    try:
+                        num = int(image_file.stem.split("_")[0])
+                        generated_images[num] = str(image_file)
+                    except (ValueError, IndexError):
+                        pass
+            if generated_images:
+                reused_count = len(generated_images)
+                st.info(f"♻️ ディスク上の既存画像を検出: {reused_count}枚（スキップ）")
+
+        # 再利用モード（別フォルダからのコピー）
         if st.session_state.reuse_mode["enabled"] and st.session_state.reuse_mode["images"]:
             status.text("♻️ 既存の画像をコピー中...")
-            image_dir = output_dir / "images"
             image_dir.mkdir(exist_ok=True)
+            copied = 0
             for num, src_path in st.session_state.reuse_mode["images"].items():
+                if num in generated_images:
+                    continue  # ディスクスキャンで既に検出済み
                 src_file = Path(src_path)
                 if src_file.exists():
                     dst_file = image_dir / src_file.name
                     if src_file.resolve() != dst_file.resolve():
                         shutil.copy2(src_file, dst_file)
                     generated_images[num] = str(dst_file)
+                    copied += 1
                 else:
                     generated_images[num] = src_path
-            reused_count = len(generated_images)
-            st.success(f"♻️ 既存の画像: {reused_count}枚をコピーしました")
+            if copied > 0:
+                reused_count = len(generated_images)
+                st.success(f"♻️ 既存の画像: {copied}枚をコピーしました")
 
         # 画像プロンプト自動生成
         user_specified = st.session_state.get("user_specified_num_images", 0)
