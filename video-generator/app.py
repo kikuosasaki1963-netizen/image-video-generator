@@ -3804,32 +3804,36 @@ def settings_page() -> None:
         st.success("✅ 設定を保存しました！")
 
 
-def _bulk_download_js(urls_and_names: list[dict[str, str]]) -> None:
-    """JavaScriptで複数ファイルを順次ダウンロード（ブラウザのブロック回避のため間隔を空ける）"""
-    import streamlit.components.v1 as components
+def _bulk_download_zip(bucket, file_infos: list[dict], zip_filename: str) -> None:
+    """GCSファイルをサーバーでZIP化してダウンロードボタンを表示する.
 
-    js_array = json.dumps(urls_and_names, ensure_ascii=False)
-    components.html(
-        f"""
-        <script>
-        (function() {{
-            var files = {js_array};
-            var delay = 800;  // 800msごとにダウンロード開始
-            files.forEach(function(f, i) {{
-                setTimeout(function() {{
-                    var a = document.createElement('a');
-                    a.href = f.url;
-                    a.download = f.name;
-                    a.style.display = 'none';
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                }}, i * delay);
-            }});
-        }})();
-        </script>
-        """,
-        height=0,
+    JavaScriptによるクロスオリジンダウンロードの制限を回避するため、
+    サーバーサイドでZIPを生成する方式を採用。
+    """
+    import io
+    import zipfile
+
+    with st.spinner(f"{len(file_infos)}ファイルをZIP圧縮中..."):
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for fi in file_infos:
+                blob_name = fi["blob_name"]
+                filename = fi["name"].split("/")[-1]
+                try:
+                    blob = bucket.blob(blob_name)
+                    data = blob.download_as_bytes()
+                    zf.writestr(filename, data)
+                except Exception as e:
+                    logging.getLogger(__name__).warning(f"ZIPスキップ: {blob_name}: {e}")
+        zip_bytes = zip_buffer.getvalue()
+
+    zip_size_mb = len(zip_bytes) / (1024 * 1024)
+    st.download_button(
+        label=f"📥 ZIPをダウンロード（{zip_size_mb:.1f}MB）",
+        data=zip_bytes,
+        file_name=zip_filename,
+        mime="application/zip",
+        key=f"zip_dl_{zip_filename}",
     )
 
 
@@ -3869,59 +3873,79 @@ def cloud_files_page() -> None:
             help="生成日時のフォルダ名を選択してください",
         )
 
+        # ファイル一覧の表示状態をセッションで管理（rerunで消えないようにする）
         if selected_folder and st.button("📂 ファイル一覧を表示", key="list_gcs_files"):
-            with st.spinner("ファイル一覧を取得中..."):
-                blobs = list(bucket.list_blobs(prefix=f"{selected_folder}/"))
-                files = [b for b in blobs if not b.name.endswith("/")]
+            st.session_state["_gcs_show_folder"] = selected_folder
+            # 前回のキャッシュをクリア
+            st.session_state.pop("_gcs_file_cache", None)
 
-            if not files:
-                st.info("このフォルダにファイルはありません。")
-                return
+        # フォルダ変更時にキャッシュをクリア
+        if st.session_state.get("_gcs_show_folder") and st.session_state["_gcs_show_folder"] != selected_folder:
+            st.session_state.pop("_gcs_show_folder", None)
+            st.session_state.pop("_gcs_file_cache", None)
 
-            from collections import defaultdict
-            groups: dict[str, list] = defaultdict(list)
-            all_files: list[dict[str, str]] = []
-            total_size = 0.0
-            for blob in files:
-                name = blob.name.removeprefix(f"{selected_folder}/")
-                parts = name.split("/")
-                folder = parts[0] if len(parts) > 1 else "その他"
-                size_mb = blob.size / (1024 * 1024) if blob.size else 0
-                total_size += size_mb
-                public_url = f"https://storage.googleapis.com/{GCS_BUCKET_NAME}/{blob.name}"
-                file_info = {
-                    "name": name,
-                    "url": public_url,
-                    "size_mb": size_mb,
-                    "folder": folder,
+        if st.session_state.get("_gcs_show_folder"):
+            active_folder = st.session_state["_gcs_show_folder"]
+
+            # ファイル一覧をキャッシュ（rerunのたびにGCS問い合わせしない）
+            if "_gcs_file_cache" not in st.session_state:
+                with st.spinner("ファイル一覧を取得中..."):
+                    blobs = list(bucket.list_blobs(prefix=f"{active_folder}/"))
+                    files = [b for b in blobs if not b.name.endswith("/")]
+
+                if not files:
+                    st.info("このフォルダにファイルはありません。")
+                    return
+
+                from collections import defaultdict
+                groups: dict[str, list] = defaultdict(list)
+                all_files: list[dict] = []
+                total_size = 0.0
+                for blob in files:
+                    name = blob.name.removeprefix(f"{active_folder}/")
+                    parts = name.split("/")
+                    folder = parts[0] if len(parts) > 1 else "その他"
+                    size_mb = blob.size / (1024 * 1024) if blob.size else 0
+                    total_size += size_mb
+                    public_url = f"https://storage.googleapis.com/{GCS_BUCKET_NAME}/{blob.name}"
+                    file_info = {
+                        "name": name,
+                        "url": public_url,
+                        "size_mb": size_mb,
+                        "folder": folder,
+                        "blob_name": blob.name,
+                    }
+                    groups[folder].append(file_info)
+                    all_files.append(file_info)
+
+                st.session_state["_gcs_file_cache"] = {
+                    "groups": dict(groups),
+                    "all_files": all_files,
+                    "total_size": total_size,
+                    "file_count": len(files),
                 }
-                groups[folder].append(file_info)
-                all_files.append(file_info)
 
-            st.success(f"{len(files)}ファイル（{total_size:.0f}MB）")
+            cache = st.session_state["_gcs_file_cache"]
+            groups = cache["groups"]
+            all_files = cache["all_files"]
+            total_size = cache["total_size"]
+
+            st.success(f"{cache['file_count']}ファイル（{total_size:.0f}MB）")
 
             # --- 一括操作 ---
             dl_col1, dl_col2 = st.columns(2)
             with dl_col1:
                 if st.button("📥 全ファイルを一括ダウンロード", key="bulk_dl_all", type="primary"):
-                    st.session_state["_bulk_dl_targets"] = [
-                        {"url": f["url"], "name": f["name"].split("/")[-1]} for f in all_files
-                    ]
+                    _bulk_download_zip(bucket, all_files, f"{active_folder}_all.zip")
             with dl_col2:
                 all_urls = "\n".join(f["url"] for f in all_files)
                 st.download_button(
                     "📋 全URLをコピー用テキストで保存",
                     data=all_urls,
-                    file_name=f"{selected_folder}_urls.txt",
+                    file_name=f"{active_folder}_urls.txt",
                     mime="text/plain",
                     key="copy_all_urls",
                 )
-
-            # 一括ダウンロード実行（ボタン押下後のrerunで発火）
-            if st.session_state.get("_bulk_dl_targets"):
-                targets = st.session_state.pop("_bulk_dl_targets")
-                st.info(f"{len(targets)}ファイルのダウンロードを開始します...")
-                _bulk_download_js(targets)
 
             st.divider()
 
@@ -3936,14 +3960,7 @@ def cloud_files_page() -> None:
                 with st.expander(f"{label}（{len(items)}ファイル / {folder_size:.0f}MB）"):
                     # カテゴリ別一括ダウンロード
                     if st.button(f"📥 {label}を一括ダウンロード", key=f"bulk_dl_{gcs_folder}"):
-                        st.session_state[f"_bulk_dl_{gcs_folder}"] = [
-                            {"url": i["url"], "name": i["name"].split("/")[-1]} for i in items
-                        ]
-
-                    if st.session_state.get(f"_bulk_dl_{gcs_folder}"):
-                        targets = st.session_state.pop(f"_bulk_dl_{gcs_folder}")
-                        st.info(f"{len(targets)}ファイルのダウンロードを開始します...")
-                        _bulk_download_js(targets)
+                        _bulk_download_zip(bucket, items, f"{active_folder}_{gcs_folder}.zip")
 
                     for item in items:
                         filename = item["name"].split("/")[-1]
