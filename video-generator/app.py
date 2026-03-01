@@ -384,9 +384,9 @@ def get_existing_output_folders() -> list[tuple[str, str]]:
                 image_dir = output_path / "images"
                 bgm_dir = output_path / "bgm"
 
-                has_audio = audio_dir.exists() and any(audio_dir.glob("*.wav")) or any(audio_dir.glob("*.mp3")) if audio_dir.exists() else False
-                has_images = image_dir.exists() and (any(image_dir.glob("*.png")) or any(image_dir.glob("*.jpg"))) if image_dir.exists() else False
-                has_bgm = bgm_dir.exists() and (any(bgm_dir.glob("*.mp3")) or any(bgm_dir.glob("*.wav"))) if bgm_dir.exists() else False
+                has_audio = audio_dir.exists() and (any(audio_dir.glob("*.wav")) or any(audio_dir.glob("*.mp3")))
+                has_images = image_dir.exists() and (any(image_dir.glob("*.png")) or any(image_dir.glob("*.jpg")))
+                has_bgm = bgm_dir.exists() and (any(bgm_dir.glob("*.mp3")) or any(bgm_dir.glob("*.wav")))
 
                 if has_audio or has_images or has_bgm:
                     folder_name = output_path.name
@@ -416,9 +416,9 @@ def get_existing_output_folders() -> list[tuple[str, str]]:
                 image_dir = folder / "images"
                 bgm_dir = folder / "bgm"
 
-                has_audio = audio_dir.exists() and (any(audio_dir.glob("*.wav")) or any(audio_dir.glob("*.mp3"))) if audio_dir.exists() else False
-                has_images = image_dir.exists() and (any(image_dir.glob("*.png")) or any(image_dir.glob("*.jpg"))) if image_dir.exists() else False
-                has_bgm = bgm_dir.exists() and (any(bgm_dir.glob("*.mp3")) or any(bgm_dir.glob("*.wav"))) if bgm_dir.exists() else False
+                has_audio = audio_dir.exists() and (any(audio_dir.glob("*.wav")) or any(audio_dir.glob("*.mp3")))
+                has_images = image_dir.exists() and (any(image_dir.glob("*.png")) or any(image_dir.glob("*.jpg")))
+                has_bgm = bgm_dir.exists() and (any(bgm_dir.glob("*.mp3")) or any(bgm_dir.glob("*.wav")))
 
                 if has_audio or has_images or has_bgm:
                     folder_name = folder.name
@@ -439,10 +439,32 @@ def load_existing_materials(folder_path_or_name: str) -> dict:
     if os.path.isabs(folder_path_or_name) or folder_path_or_name.startswith("/"):
         folder_path = Path(folder_path_or_name)
     else:
-        # フォルダ名の場合は設定から親フォルダを取得
+        # フォルダ名の場合は複数の候補パスを試行
+        folder_path = None
+        candidates = []
+
+        # 1. セッション状態のカスタム出力先
+        if "custom_output_folder" in st.session_state and st.session_state.custom_output_folder:
+            candidates.append(Path(st.session_state.custom_output_folder) / folder_path_or_name)
+
+        # 2. OS別デフォルトフォルダ
+        candidates.append(Path(get_default_output_folder()) / folder_path_or_name)
+
+        # 3. 設定ファイルの出力先
         settings = load_settings()
-        output_folder = settings.get("defaults", {}).get("output_folder", "output")
-        folder_path = Path(output_folder) / folder_path_or_name
+        configured_folder = settings.get("defaults", {}).get("output_folder", "output")
+        candidates.append(Path(configured_folder) / folder_path_or_name)
+
+        # 4. 相対パス（output/）
+        candidates.append(Path("output") / folder_path_or_name)
+
+        for candidate in candidates:
+            if candidate.exists():
+                folder_path = candidate
+                break
+
+        if folder_path is None:
+            folder_path = candidates[0]  # 見つからない場合は最優先候補を使用
 
     result = {
         "audio_files": {},
@@ -522,17 +544,9 @@ def get_history_file_path() -> Path:
         if not Path("/mount/src").exists():
             history_dir = Path.cwd() / ".app_data"
     else:
-        # ローカル: 出力フォルダに保存（従来互換）
-        if "custom_output_folder" in st.session_state and st.session_state.custom_output_folder:
-            output_folder = st.session_state.custom_output_folder
-        else:
-            settings = load_settings()
-            configured_folder = settings.get("defaults", {}).get("output_folder", "")
-            if not configured_folder or configured_folder == "output":
-                output_folder = get_default_output_folder()
-            else:
-                output_folder = configured_folder
-        history_dir = Path(output_folder)
+        # ローカル: OS別のデフォルト出力フォルダに固定保存
+        # custom_output_folder に依存せず、常に同じ場所に保存
+        history_dir = Path(get_default_output_folder())
 
     history_path = history_dir / "generation_history.json"
     history_path.parent.mkdir(parents=True, exist_ok=True)
@@ -558,20 +572,33 @@ def load_generation_history() -> list[dict]:
     # セッションステートのキャッシュと統合
     session_history: list[dict] = st.session_state.get("_history_cache", [])
 
-    if file_history:
-        # ファイルの履歴をセッションにキャッシュ
-        st.session_state._history_cache = file_history
-        return file_history
-    elif session_history:
-        # ファイルが消えた場合（リブート等）はセッションキャッシュを使用し、ファイルも復元
+    # ファイルとセッション両方をマージ（IDで重複排除、新しい方を優先）
+    merged: dict[str, dict] = {}
+    for entry in session_history:
+        entry_id = entry.get("id", "")
+        if entry_id:
+            merged[entry_id] = entry
+    for entry in file_history:
+        entry_id = entry.get("id", "")
+        if entry_id:
+            # ファイル側の方が新しいか、セッションに無い場合は上書き
+            existing = merged.get(entry_id)
+            if not existing or entry.get("updated_at", "") >= existing.get("updated_at", ""):
+                merged[entry_id] = entry
+
+    history = sorted(merged.values(), key=lambda e: e.get("created_at", ""), reverse=True)[:50]
+
+    # 両方にキャッシュ
+    st.session_state._history_cache = history
+    if history and history != file_history:
         try:
             history_file.parent.mkdir(parents=True, exist_ok=True)
             with open(history_file, "w", encoding="utf-8") as f:
-                json.dump(session_history, f, ensure_ascii=False, indent=2)
+                json.dump(history, f, ensure_ascii=False, indent=2)
         except (IOError, OSError):
             pass
-        return session_history
-    return []
+
+    return history
 
 
 def save_generation_history(history: list[dict]) -> None:
@@ -918,7 +945,6 @@ def main_page() -> None:
                     with col3:
                         if st.button("▶️ 再開", key=f"resume_{entry['id']}"):
                             output_dir_path = Path(entry.get("output_dir", ""))
-                            folder_name = output_dir_path.name
 
                             # 台本とプロンプトを復元
                             restored_script = load_script_from_output(output_dir_path)
@@ -934,16 +960,16 @@ def main_page() -> None:
                                 if restored_prompts:
                                     st.session_state.prompts = restored_prompts
 
-                                if folder_name:
-                                    materials = load_existing_materials(folder_name)
-                                    st.session_state.reuse_mode = {
-                                        "enabled": True,
-                                        "folder": folder_name,
-                                        "audio_files": materials["audio_files"],
-                                        "images": materials["images"],
-                                        "bgm": materials["bgm"],
-                                        "videos": materials["videos"],
-                                    }
+                                # フルパスを渡して素材を読み込み
+                                materials = load_existing_materials(str(output_dir_path))
+                                st.session_state.reuse_mode = {
+                                    "enabled": True,
+                                    "folder": str(output_dir_path),
+                                    "audio_files": materials["audio_files"],
+                                    "images": materials["images"],
+                                    "bgm": materials["bgm"],
+                                    "videos": materials["videos"],
+                                }
 
                                 # 出力ディレクトリを設定
                                 st.session_state.output_dir = output_dir_path
@@ -952,12 +978,13 @@ def main_page() -> None:
                                 st.rerun()
                             else:
                                 st.error("❌ 台本ファイルが見つかりません。台本を再度アップロードしてください。")
-                                # 素材だけでも読み込む
-                                if folder_name:
-                                    materials = load_existing_materials(folder_name)
+                                # 素材だけでも読み込む（フルパスを使用）
+                                materials = load_existing_materials(str(output_dir_path))
+                                has_any = materials["audio_files"] or materials["images"] or materials["bgm"] or materials["videos"]
+                                if has_any:
                                     st.session_state.reuse_mode = {
                                         "enabled": True,
-                                        "folder": folder_name,
+                                        "folder": str(output_dir_path),
                                         "audio_files": materials["audio_files"],
                                         "images": materials["images"],
                                         "bgm": materials["bgm"],
