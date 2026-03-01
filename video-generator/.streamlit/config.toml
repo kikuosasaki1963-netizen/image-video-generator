@@ -3,6 +3,8 @@ maxUploadSize = 200
 # セッション切断までの猶予を最大化（秒）
 enableWebsocketCompression = true
 maxMessageSize = 500
+# WebSocket pingで接続を維持（デフォルト20秒→短縮して切断を防止）
+enableStaticServing = false
 
 [browser]
 gatherUsageStats = false

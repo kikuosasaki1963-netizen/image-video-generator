@@ -364,6 +364,25 @@ class TTSClient:
             logger.error(error_msg)
             raise TTSError(error_msg, original_error=e)
 
+    @staticmethod
+    def _keepalive_sleep(seconds: float, progress_callback: callable | None = None, message: str = "") -> None:
+        """Streamlit接続を維持しながら待機する
+
+        time.sleep() の代わりに使用。1秒ごとにUIを更新して
+        WebSocket接続のタイムアウトを防ぐ。
+        """
+        import time
+
+        elapsed = 0.0
+        while elapsed < seconds:
+            chunk = min(1.0, seconds - elapsed)
+            time.sleep(chunk)
+            elapsed += chunk
+            if progress_callback and message:
+                remaining = int(seconds - elapsed)
+                if remaining > 0:
+                    progress_callback(-1, -1, f"⏳ {message}（残り{remaining}秒）")
+
     def _synthesize_script_sequential(
         self,
         script: Script,
@@ -372,8 +391,6 @@ class TTSClient:
         allow_fallback: bool = False,
     ) -> Path:
         """Gemini TTSで台本を音声化（レート制限対策強化版）"""
-        import time
-
         # 設定
         WAIT_BETWEEN_REQUESTS = 12.0  # リクエスト間の待機時間（秒）- 安全マージン確保
         MAX_RETRIES = 5  # 最大リトライ回数
@@ -417,9 +434,12 @@ class TTSClient:
                     generated_files.append(wav_path)
                     line_success = True
 
-                    # 次のリクエストまで待機（最後以外）
+                    # 次のリクエストまで待機（最後以外）— keep-alive付き
                     if i < total_lines - 1:
-                        time.sleep(WAIT_BETWEEN_REQUESTS)
+                        self._keepalive_sleep(
+                            WAIT_BETWEEN_REQUESTS, progress_callback,
+                            f"次のセリフ待機中 {i + 2}/{total_lines}",
+                        )
                     break
 
                 except TTSError as e:
@@ -438,7 +458,10 @@ class TTSClient:
                         wait_time = RETRY_BASE_WAIT * (retry + 1)  # 30秒、60秒、90秒...
                         if retry < MAX_RETRIES - 1:
                             logger.warning(f"レート制限検出 - {wait_time}秒待機後リトライ ({retry + 1}/{MAX_RETRIES})")
-                            time.sleep(wait_time)
+                            self._keepalive_sleep(
+                                wait_time, progress_callback,
+                                f"レート制限回復待ち（リトライ{retry + 1}/{MAX_RETRIES}）",
+                            )
                             continue
                         else:
                             logger.error(f"レート制限: セリフ {i + 1}/{total_lines} を{MAX_RETRIES}回リトライ後スキップ")
@@ -447,7 +470,10 @@ class TTSClient:
                         wait_time = RETRY_BASE_WAIT * (retry + 1)
                         if retry < MAX_RETRIES - 1:
                             logger.warning(f"TTS エラー - {wait_time}秒待機後リトライ: {e}")
-                            time.sleep(wait_time)
+                            self._keepalive_sleep(
+                                wait_time, progress_callback,
+                                f"エラー回復待ち（リトライ{retry + 1}/{MAX_RETRIES}）",
+                            )
                             continue
                         else:
                             logger.error(f"音声生成失敗（セリフ {i + 1}）: {e}")
@@ -456,7 +482,10 @@ class TTSClient:
                     wait_time = RETRY_BASE_WAIT * (retry + 1)
                     if retry < MAX_RETRIES - 1:
                         logger.warning(f"予期しないエラー - {wait_time}秒待機後リトライ: {e}")
-                        time.sleep(wait_time)
+                        self._keepalive_sleep(
+                            wait_time, progress_callback,
+                            f"エラー回復待ち（リトライ{retry + 1}/{MAX_RETRIES}）",
+                        )
                         continue
                     else:
                         logger.error(f"音声生成失敗（セリフ {i + 1}）: {e}")
@@ -470,7 +499,7 @@ class TTSClient:
         # 失敗したセリフがある場合、リトライ（レート制限回復後）
         if failed_lines and generated_files:
             logger.info(f"失敗セリフ {len(failed_lines)}件をリトライ（60秒待機後）")
-            time.sleep(60)
+            self._keepalive_sleep(60, progress_callback, "失敗セリフ再試行準備中")
             for i, line in enumerate(script.lines):
                 if (i + 1) not in failed_lines:
                     continue
@@ -485,7 +514,10 @@ class TTSClient:
                     failed_lines.remove(i + 1)
                     logger.info(f"リトライ成功: セリフ {i + 1}")
                     if i < total_lines - 1:
-                        time.sleep(WAIT_BETWEEN_REQUESTS)
+                        self._keepalive_sleep(
+                            WAIT_BETWEEN_REQUESTS, progress_callback,
+                            f"リトライ待機中",
+                        )
                 except Exception as e:
                     logger.error(f"リトライも失敗（セリフ {i + 1}）: {e}")
 

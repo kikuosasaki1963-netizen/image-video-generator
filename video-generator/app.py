@@ -2470,6 +2470,10 @@ def run_step_audio(script, output_dir: Path, history_entry: dict | None = None) 
 
         if audio_mode == "batch":
             def update_progress(current, total, message):
+                # keep-alive呼び出し（current=-1）ではプログレスバーを更新せずステータスのみ更新
+                if current == -1 and total == -1:
+                    status.text(f"🎤 {message}")
+                    return
                 progress.progress((current + 1) / total)
                 status.text(f"🎤 生成中: {current + 1}/{total} - {message}")
                 if history_entry and (current + 1) % 5 == 0:
@@ -3497,9 +3501,12 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
 
         # Gemini APIレート制限回復のため待機（TTS/BGM/動画で消費した分）
         if generate_audio or generate_bg_video:
-            st.info("⏳ APIレート制限回復中（30秒）...")
             _gc.collect()
-            _time.sleep(30)
+            _wait_status = st.empty()
+            for _sec in range(30, 0, -1):
+                _wait_status.info(f"⏳ APIレート制限回復中（残り{_sec}秒）...")
+                _time.sleep(1)
+            _wait_status.empty()
 
         # STEP 4: 画像生成
         img_result = {"files": {"images": {}}}
