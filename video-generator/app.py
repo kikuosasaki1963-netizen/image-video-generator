@@ -2911,12 +2911,24 @@ def _download_stock_videos(script, prompts, video_dir: Path, output_dir: Path, p
         "インフレ": "inflation economy city", "価格": "shopping price", "給料": "office working",
     }
 
-    def _to_english_query(text: str) -> str:
+    # セグメントごとにユニークな検索クエリを生成するためのフォールバックキーワード
+    _fallback_queries = [
+        "business office city", "cityscape skyline aerial", "technology digital modern",
+        "nature landscape scenic", "people walking street", "abstract motion background",
+        "ocean waves water", "night city lights", "sunrise morning sky", "forest green nature",
+        "highway traffic cars", "rain weather atmospheric", "mountain landscape aerial",
+        "crowd people urban", "architecture modern building", "clouds sky timelapse",
+    ]
+
+    def _to_english_query(text: str, index: int = 0) -> str:
         matches = []
         for jp, en in _jp_to_en.items():
             if jp in text:
                 matches.append(en)
-        base = " ".join(matches[:3]) if matches else "business office city"
+        if matches:
+            base = " ".join(matches[:3])
+        else:
+            base = _fallback_queries[index % len(_fallback_queries)]
         if style_suffix:
             return f"{base} {style_suffix}"
         return base
@@ -2935,21 +2947,32 @@ def _download_stock_videos(script, prompts, video_dir: Path, output_dir: Path, p
     if chapters:
         # チャプター数がtarget_countより少なければ全部、多ければ間引き
         if len(chapters) <= target_count:
-            search_items = [(i + 1, _to_english_query(ch)) for i, ch in enumerate(chapters)]
+            search_items = [(i + 1, _to_english_query(ch, i)) for i, ch in enumerate(chapters)]
         else:
             ch_step = max(1, len(chapters) // target_count)
-            search_items = [(i + 1, _to_english_query(chapters[i])) for i in range(0, len(chapters), ch_step)][:target_count]
+            search_items = [(i + 1, _to_english_query(chapters[i], i)) for i in range(0, len(chapters), ch_step)][:target_count]
         st.info(f"📑 {len(chapters)}個のチャプターを検出 → {len(search_items)}本の背景動画を取得")
     elif prompts and prompts.prompts:
         step = max(1, len(prompts.prompts) // target_count)
         selected = prompts.prompts[::step][:target_count]
-        search_items = [(p.number, _to_english_query(p.prompt)) for p in selected]
+        search_items = [(p.number, _to_english_query(p.prompt, i)) for i, p in enumerate(selected)]
     elif script and script.lines:
         step = max(1, len(script.lines) // target_count)
         selected = script.lines[::step][:target_count]
-        search_items = [(i + 1, _to_english_query(line.text)) for i, line in enumerate(selected)]
+        search_items = [(i + 1, _to_english_query(line.text, i)) for i, line in enumerate(selected)]
     else:
         search_items = [(1, "abstract background")]
+
+    # 同じクエリが連続しないようにバリエーションを確保
+    seen_queries: dict[str, int] = {}
+    for idx, (num, query) in enumerate(search_items):
+        if query in seen_queries:
+            seen_queries[query] += 1
+            # 重複クエリにはフォールバックから別キーワードを付与
+            alt = _fallback_queries[(idx + seen_queries[query]) % len(_fallback_queries)]
+            search_items[idx] = (num, f"{query} {alt.split()[0]}")
+        else:
+            seen_queries[query] = 0
 
     # ハイブリッドモード: 指定セグメントのみをダウンロード対象にする
     if target_numbers is not None:
@@ -2961,29 +2984,38 @@ def _download_stock_videos(script, prompts, video_dir: Path, output_dir: Path, p
             if tn not in existing_nums:
                 search_items.append((tn, "business office background"))
 
+    # 既にダウンロード済みの動画IDを追跡（重複回避）
+    used_video_ids: set[str] = set()
+
     for i, (number, search_query) in enumerate(search_items):
         try:
-            status.text(f"🎥 背景動画検索中: {i + 1}/{len(search_items)}")
+            status.text(f"🎥 背景動画検索中: {i + 1}/{len(search_items)} — {search_query}")
             downloaded = False
-            # 複数候補から順番にダウンロード試行（サイズ超過時は次の候補へ）
-            videos = stock_client.search_pexels(search_query, per_page=3)
+            # per_page を増やして候補を多く取得し、重複を回避
+            videos = stock_client.search_pexels(search_query, per_page=8)
             for vid in videos:
+                if vid.id in used_video_ids:
+                    continue
                 try:
                     video_path = video_dir / f"{number:03d}_bg.mp4"
                     stock_client.download(vid, video_path)
                     background_videos[number] = str(video_path)
+                    used_video_ids.add(vid.id)
                     st.success(f"✅ 背景動画 {number} ダウンロード完了")
                     downloaded = True
                     break
                 except Exception:
                     continue
             if not downloaded:
-                videos = stock_client.search_pixabay(search_query, per_page=3)
+                videos = stock_client.search_pixabay(search_query, per_page=8)
                 for vid in videos:
+                    if vid.id in used_video_ids:
+                        continue
                     try:
                         video_path = video_dir / f"{number:03d}_bg.mp4"
                         stock_client.download(vid, video_path)
                         background_videos[number] = str(video_path)
+                        used_video_ids.add(vid.id)
                         st.success(f"✅ 背景動画 {number} ダウンロード完了 (Pixabay)")
                         downloaded = True
                         break
@@ -2997,7 +3029,7 @@ def _download_stock_videos(script, prompts, video_dir: Path, output_dir: Path, p
 
         progress.progress((i + 1) / len(search_items))
 
-    # 生成されたクリップを全プロンプトに配布
+    # 生成されたクリップを全プロンプトに配布（ラウンドロビンでバリエーション確保）
     if background_videos:
         all_pn = []
         if prompts and prompts.prompts:
@@ -3006,10 +3038,14 @@ def _download_stock_videos(script, prompts, video_dir: Path, output_dir: Path, p
             all_pn = [i + 1 for i in range(len(script.lines))]
         if all_pn:
             generated_numbers = sorted(background_videos.keys())
+            unique_paths = list(dict.fromkeys(background_videos[n] for n in generated_numbers))
             spread = {}
-            for pn in all_pn:
-                closest = min(generated_numbers, key=lambda g: abs(g - pn))
-                spread[pn] = background_videos[closest]
+            for idx, pn in enumerate(all_pn):
+                if pn in background_videos:
+                    spread[pn] = background_videos[pn]
+                else:
+                    # ラウンドロビンで異なる動画を割り当て
+                    spread[pn] = unique_paths[idx % len(unique_paths)]
             background_videos = spread
 
     if background_videos:
