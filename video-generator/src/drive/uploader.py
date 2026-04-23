@@ -37,6 +37,7 @@ class DriveUploader:
         self._client = None
         self._progress_callback = progress_callback
         self._link_cache: dict[str, list[dict[str, str]]] = {}
+        self.last_failed: list[dict[str, str]] = []
 
     def _get_client(self):
         """GCS クライアントを遅延初期化"""
@@ -162,6 +163,7 @@ class DriveUploader:
 
         # キャッシュに保存
         self._link_cache[folder_name] = uploaded_links
+        self.last_failed = failed_files
 
         if failed_files:
             logger.warning(f"{len(failed_files)}/{total} ファイルのアップロードに失敗: {[f['name'] for f in failed_files]}")

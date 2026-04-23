@@ -288,6 +288,20 @@ class ScriptParser:
             if result:
                 speaker_name, text = result
                 speaker = self._normalize_speaker(speaker_name, speaker_map)
+                # 後続の段落を次の話者まで集める（複数段落セリフに対応）
+                text_parts = [text] if text else []
+                while i < len(lines):
+                    next_line = lines[i].strip()
+                    if self._match_speaker(next_line) or self._match_speaker_only(next_line):
+                        break
+                    if self._is_script_end(next_line):
+                        break
+                    if next_line:
+                        text_parts.append(next_line)
+                    i += 1
+                text = " ".join(text_parts).strip()
+                if not text:
+                    continue
                 line_number += 1
             else:
                 # 話者のみの行（次の行にテキスト）

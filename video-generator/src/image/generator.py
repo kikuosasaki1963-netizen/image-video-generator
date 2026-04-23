@@ -9,14 +9,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from src.utils.config import get_env_var, load_settings
-from src.utils.exceptions import ConfigurationError, ImageGenerationError
+from src.utils.exceptions import ConfigurationError, ImageGenerationError, RateLimitError
 from src.utils.retry import with_retry
 
 logger = logging.getLogger(__name__)
 
 # リトライ設定
 MAX_RETRIES = 3
-BASE_DELAY = 2.0
+BASE_DELAY = 15.0
 
 
 @dataclass
@@ -321,7 +321,7 @@ class ImageGenerator:
     # 画像生成モデルの優先順位（フォールバック対応）
     IMAGE_MODELS = ["gemini-3-pro-image-preview", "gemini-2.5-flash-image"]
 
-    @with_retry(max_retries=MAX_RETRIES, base_delay=BASE_DELAY)
+    @with_retry(max_retries=MAX_RETRIES, base_delay=BASE_DELAY, max_delay=60.0)
     def _generate_with_retry(self, prompt: str, output_path: str | Path) -> Path:
         """リトライ付き画像生成（内部メソッド）"""
         try:
@@ -358,7 +358,14 @@ class ImageGenerator:
                 except Exception as model_err:
                     last_error = model_err
                     error_str = str(model_err)
-                    if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "not found" in error_str.lower() or "not supported" in error_str.lower():
+                    if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                        raise RateLimitError(
+                            f"レート制限: {error_str[:100]}",
+                            service_name="Gemini Image",
+                            retry_after=30,
+                            original_error=model_err,
+                        )
+                    if "not found" in error_str.lower() or "not supported" in error_str.lower():
                         logger.warning("モデル %s 利用不可、次のモデルを試行: %s", model, error_str[:100])
                         continue
                     raise
@@ -391,6 +398,8 @@ class ImageGenerator:
             raise ImageGenerationError("レスポンスに画像データが含まれていません")
 
         except ConfigurationError:
+            raise
+        except RateLimitError:
             raise
         except ImageGenerationError:
             raise

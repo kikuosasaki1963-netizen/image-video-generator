@@ -553,21 +553,36 @@ def get_history_file_path() -> Path:
     return history_path
 
 
+def _load_history_from_file(path: Path) -> list[dict]:
+    """指定パスから履歴JSONを読み込む（存在しない場合は空リスト）"""
+    if path.exists():
+        try:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+    return []
+
+
 def load_generation_history() -> list[dict]:
     """生成履歴を読み込む
 
     ファイルとセッションステートの両方から読み込み、
     セッション中にファイルが消えても履歴を維持する。
+    複数の候補パスから履歴を探索し、マージする。
     """
-    # ファイルから読み込み
+    # プライマリ: デフォルト出力フォルダ内の履歴ファイル
     history_file = get_history_file_path()
-    file_history: list[dict] = []
-    if history_file.exists():
-        try:
-            with open(history_file, encoding="utf-8") as f:
-                file_history = json.load(f)
-        except (json.JSONDecodeError, IOError):
-            file_history = []
+    file_history = _load_history_from_file(history_file)
+
+    # フォールバック: custom_output_folder 内の履歴ファイルも探索
+    # （iCloud同期や出力先変更時にプライマリと異なるパスに履歴がある場合に対応）
+    custom_folder = st.session_state.get("custom_output_folder", "")
+    if custom_folder:
+        custom_history_path = Path(custom_folder) / "generation_history.json"
+        if custom_history_path != history_file:
+            fallback_history = _load_history_from_file(custom_history_path)
+            file_history = file_history + fallback_history
 
     # セッションステートのキャッシュと統合
     session_history: list[dict] = st.session_state.get("_history_cache", [])
@@ -649,7 +664,7 @@ def read_error_log(output_dir: Path) -> str | None:
 def create_history_entry(output_dir: str, status: str = "in_progress") -> dict:
     """履歴エントリを作成"""
     return {
-        "id": datetime.now().strftime("%Y%m%d_%H%M%S"),
+        "id": datetime.now().strftime("%Y%m%d_%H%M%S_%f"),
         "output_dir": output_dir,
         "status": status,  # "in_progress", "completed", "interrupted"
         "created_at": datetime.now().isoformat(),
@@ -847,6 +862,35 @@ def clear_all_history() -> None:
     save_generation_history([])
 
 
+def _batch_advance_pipeline():
+    """バッチパイプラインの次ステップを自動的にキューに入れる"""
+    pipeline = st.session_state.get("_batch_pipeline")
+    if not pipeline:
+        st.session_state._batch_auto = False
+        # 履歴を完了に更新（timeline未実行の場合も対応）
+        hist_id = st.session_state.get("current_history_id")
+        if hist_id:
+            _entry = get_history_entry(hist_id)
+            if _entry and _entry["status"] == "in_progress":
+                _entry["status"] = "completed"
+                add_history_entry(_entry)
+        st.session_state.generation_complete = True
+        st.session_state.resume_mode = {"enabled": False, "entry": None}
+        st.session_state.reuse_mode = {"enabled": False, "folder": None, "audio_files": {}, "images": {}, "bgm": None, "videos": {}}
+        st.session_state.current_history_id = None
+        st.session_state._batch_pipeline = None
+        return  # パイプライン完了
+
+    next_step = pipeline.pop(0)
+
+    # APIレート制限の待機が必要なステップ前にwaitを挿入
+    if next_step in ("images", "audio"):
+        st.session_state._pending_step = "wait_api"
+        st.session_state._wait_next = next_step
+    else:
+        st.session_state._pending_step = next_step
+
+
 def main_page() -> None:
     """P-001: 動画生成メインページ"""
     st.title("🎬 動画生成エージェント")
@@ -896,8 +940,16 @@ def main_page() -> None:
         st.session_state.step_mode = True
     if "_last_script_name" not in st.session_state:
         st.session_state._last_script_name = ""
+    if "_last_prompt_name" not in st.session_state:
+        st.session_state._last_prompt_name = ""
+    if "prompt_raw_content" not in st.session_state:
+        st.session_state.prompt_raw_content = ""
     if "_pending_step" not in st.session_state:
         st.session_state._pending_step = None
+    if "_batch_pipeline" not in st.session_state:
+        st.session_state._batch_pipeline = None  # 残りステップのキュー e.g. ["audio","bg_video","images","bgm","timeline"]
+    if "_batch_auto" not in st.session_state:
+        st.session_state._batch_auto = False  # バッチ自動進行フラグ
 
     # 履歴セクション（常に表示）
     with st.expander("📜 生成履歴", expanded=True):
@@ -1000,6 +1052,42 @@ def main_page() -> None:
                                     st.code(error_content, language="text")
                     with col5:
                         if st.button("🗑️", key=f"del_int_{entry['id']}", help="この履歴を削除"):
+                            delete_history_entry(entry["id"])
+                            st.rerun()
+
+                st.divider()
+
+            # 進行中の生成
+            in_progress_entries = [e for e in history if e["status"] == "in_progress"]
+            if in_progress_entries:
+                st.subheader("🔄 進行中の生成")
+
+                for entry in in_progress_entries[:5]:
+                    progress = entry.get("progress", {})
+                    completed_steps = sum(1 for v in progress.values() if v)
+                    total_steps = len(progress)
+                    output_dir_path = Path(entry.get("output_dir", ""))
+
+                    col1, col2, col3 = st.columns([4, 2, 1])
+                    with col1:
+                        st.markdown(f"**{entry['id']}**")
+                        st.caption(f"出力先: {entry.get('output_dir', '不明')}")
+                    with col2:
+                        st.progress(completed_steps / total_steps if total_steps > 0 else 0)
+                        steps_text = []
+                        if progress.get("script_parsed"):
+                            steps_text.append("✅台本")
+                        if progress.get("audio_generated"):
+                            steps_text.append("✅音声")
+                        if progress.get("images_generated"):
+                            steps_text.append("✅画像")
+                        if progress.get("bgm_generated"):
+                            steps_text.append("✅BGM")
+                        if progress.get("video_generated"):
+                            steps_text.append("✅動画")
+                        st.caption(" ".join(steps_text) if steps_text else "処理中...")
+                    with col3:
+                        if st.button("🗑️", key=f"del_prog_{entry['id']}", help="この履歴を削除"):
                             delete_history_entry(entry["id"])
                             st.rerun()
 
@@ -1230,6 +1318,17 @@ def main_page() -> None:
             last_script_name = st.session_state.get("_last_script_name", "")
             if script_file.name != last_script_name:
                 st.session_state._last_script_name = script_file.name
+                # 新しい台本 → 前回の生成ステートをリセット
+                st.session_state.output_dir = None
+                st.session_state.generation_complete = False
+                st.session_state.current_history_id = None
+                st.session_state.audio_files = {}
+                # 新しい台本に対応する画像プロンプトが必要なので、古いプロンプトをクリア
+                # 次のリランでプロンプトファイルがあれば再パースされる
+                st.session_state.prompts = None
+                st.session_state.prompt_raw_content = ""
+                st.session_state._last_prompt_name = ""
+                # 再利用モード（選択済み素材）はユーザーの意図を尊重して保持する
                 # 生のコンテンツを保存（項数検出用）
                 if script_file.name.lower().endswith(".docx"):
                     from docx import Document
@@ -1282,39 +1381,53 @@ def main_page() -> None:
         if prompt_file:
             st.success(f"✅ {prompt_file.name} をアップロードしました")
 
-            # ファイル内容を読み取り
-            if prompt_file.name.lower().endswith(".docx"):
-                from docx import Document
-                doc = Document(BytesIO(prompt_file.getvalue()))
-                file_content = "\n".join(para.text for para in doc.paragraphs)
+            # 新しいファイルの場合、またはセッションにパース結果が無い場合のみパースする
+            last_prompt_name = st.session_state.get("_last_prompt_name", "")
+            needs_parse = (
+                prompt_file.name != last_prompt_name
+                or st.session_state.prompts is None
+                or getattr(st.session_state.prompts, "total_images", 0) == 0
+            )
+            if needs_parse:
+                # ファイル内容を読み取り
+                if prompt_file.name.lower().endswith(".docx"):
+                    from docx import Document
+                    doc = Document(BytesIO(prompt_file.getvalue()))
+                    file_content = "\n".join(para.text for para in doc.paragraphs)
+                else:
+                    file_content = prompt_file.getvalue().decode("utf-8")
+
+                # プロンプトファイルの生コンテンツを保存（チャプター検出用）
+                st.session_state.prompt_raw_content = file_content
+
+                # プロンプトをパース（既に読み取ったfile_contentを直接渡す）
+                generator = ImageGenerator()
+                parsed_prompts = generator.parse_prompt_text(file_content, prompt_file.name)
+                st.session_state.prompts = parsed_prompts
+                st.session_state._last_prompt_name = prompt_file.name
+
+                # パース結果をすぐに表示（デバッグ用）
+                if parsed_prompts.total_images > 0:
+                    st.info(f"🎨 {parsed_prompts.total_images}件のプロンプトを検出しました")
+                else:
+                    st.warning(
+                        "⚠️ 画像プロンプトを検出できませんでした。\n\n"
+                        "**対応形式:**\n"
+                        "- `[番号] 開始時間-終了時間 | プロンプト` 形式\n"
+                        "  例: `[1] 0:00-0:15 | 青空の下で微笑む人物`\n"
+                        "- `【画像生成プロンプト】` セクション形式\n"
+                        "  例: `1. タイトル\\n【画像生成プロンプト】\\nプロンプト内容`\n"
+                        "- `番号. プロンプト` シンプルリスト形式\n"
+                        "  例: `1. 青空の下で微笑む人物`"
+                    )
+                    # ファイル内容のプレビューを表示（デバッグ用）
+                    with st.expander("📄 ファイル内容プレビュー（先頭500文字）"):
+                        st.code(file_content[:500] if len(file_content) > 500 else file_content)
             else:
-                file_content = prompt_file.getvalue().decode("utf-8")
-
-            # プロンプトファイルの生コンテンツを保存（チャプター検出用）
-            st.session_state.prompt_raw_content = file_content
-
-            # プロンプトをパース（既に読み取ったfile_contentを直接渡す）
-            generator = ImageGenerator()
-            parsed_prompts = generator.parse_prompt_text(file_content, prompt_file.name)
-            st.session_state.prompts = parsed_prompts
-
-            # パース結果をすぐに表示（デバッグ用）
-            if parsed_prompts.total_images > 0:
-                st.info(f"🎨 {parsed_prompts.total_images}件のプロンプトを検出しました")
-            else:
-                st.warning(
-                    "⚠️ 画像プロンプトを検出できませんでした。\n\n"
-                    "**対応形式:**\n"
-                    "- `[番号] 開始時間-終了時間 | プロンプト` 形式\n"
-                    "  例: `[1] 0:00-0:15 | 青空の下で微笑む人物`\n"
-                    "- `【画像生成プロンプト】` セクション形式\n"
-                    "  例: `1. タイトル\\n【画像生成プロンプト】\\nプロンプト内容`\n"
-                    "- `番号. プロンプト` シンプルリスト形式\n"
-                    "  例: `1. 青空の下で微笑む人物`"
-                )
-                # ファイル内容のプレビューを表示（デバッグ用）
-                with st.expander("📄 ファイル内容プレビュー（先頭500文字）"):
-                    st.code(file_content[:500] if len(file_content) > 500 else file_content)
+                # 既にパース済み：キャッシュされた結果を表示
+                prompts_cached = st.session_state.prompts
+                if prompts_cached and prompts_cached.total_images > 0:
+                    st.info(f"🎨 {prompts_cached.total_images}件のプロンプトを検出済み（キャッシュ）")
         elif st.session_state.script and not st.session_state.prompts:
             st.info("💡 画像プロンプトファイルがない場合、台本から自動生成できます")
 
@@ -1693,20 +1806,19 @@ def main_page() -> None:
         )
         st.session_state.step_mode = step_mode
 
-        if step_mode:
-            # ステップモード: 個別ボタンUI
-            st.markdown("各ステップを個別に実行できます。完了後にメモリが解放されます。")
+        # --- 共通セットアップ（ステップ/バッチ両モード共通） ---
 
-            # 出力ディレクトリ準備
-            if not st.session_state.output_dir:
-                st.session_state.output_dir = get_output_dir()
-            step_output_dir = Path(st.session_state.output_dir)
+        # 出力ディレクトリ準備
+        if not st.session_state.output_dir:
+            st.session_state.output_dir = get_output_dir()
+        step_output_dir = Path(st.session_state.output_dir)
 
-            # ステップ状態検出
-            step_status = detect_step_status(step_output_dir)
+        # ステップ状態検出
+        step_status = detect_step_status(step_output_dir)
 
-            # 履歴エントリ準備
-            step_history = None
+        # 履歴エントリ準備（生成実行時のみ — 通常のrerunでは幽霊エントリを作らない）
+        step_history = None
+        if st.session_state.get("_pending_step") or st.session_state.get("_batch_auto"):
             try:
                 step_history = _get_or_create_history_entry(step_output_dir)
                 step_history["settings"]["output_mode"] = mode
@@ -1727,68 +1839,117 @@ def main_page() -> None:
                         step_history["files"]["prompts_file"] = str(prompts_file)
                 add_history_entry(step_history)
 
-            # --- 実行予約の処理（ボタンではなくフラグで駆動） ---
-            pending_step = st.session_state.get("_pending_step")
-            if pending_step:
-                st.session_state._pending_step = None
-                is_regen = st.session_state.pop("_pending_regen", False)
+        # --- バッチパイプライン進捗UI ---
+        if st.session_state.get("_batch_auto"):
+            pipeline = st.session_state.get("_batch_pipeline", [])
+            pending = st.session_state.get("_pending_step")
+            remaining = len(pipeline) if pipeline else 0
+            # 実行中ステップ＋残りキューで全体を推定
+            total_steps = remaining + (1 if pending else 0)
+            if total_steps > 0:
+                step_names = {"audio": "音声", "bgm": "BGM", "bg_video": "背景動画", "images": "画像", "timeline": "動画合成", "wait_api": "API待機"}
+                current_name = step_names.get(pending, pending) if pending else ""
+                st.info(f"🔄 一括生成中... 実行中: {current_name}（残り{remaining}ステップ）")
 
-                if is_regen:
-                    # 再生成: そのステップの再利用データだけ無効化
-                    if pending_step == "audio":
-                        st.session_state.reuse_mode["audio_files"] = {}
-                    elif pending_step == "bgm":
-                        st.session_state.reuse_mode["bgm"] = None
-                    elif pending_step == "bg_video":
-                        st.session_state.reuse_mode["videos"] = {}
-                    elif pending_step == "images":
-                        st.session_state.reuse_mode["images"] = {}
-                    elif pending_step == "timeline":
-                        _clear_step_files(step_output_dir, ["timeline.csv"])
-                        _clear_step_files(step_output_dir / "videos", ["*.mp4"], exclude_subdir="backgrounds")
+        # --- 実行予約の処理（ステップ/バッチ両モード共通・フラグで駆動） ---
+        pending_step = st.session_state.get("_pending_step")
+        if pending_step:
+            st.session_state._pending_step = None
+            is_regen = st.session_state.pop("_pending_regen", False)
 
-                # 結合済みファイルを削除（個別ファイルは残してスキップ用に使う）
-                if pending_step == "audio":
-                    full_wav = step_output_dir / "audio" / "full_audio.wav"
-                    if full_wav.exists():
-                        full_wav.unlink(missing_ok=True)
-                    st.session_state.audio_files = {}
-
-                try:
-                    if pending_step == "audio":
-                        run_step_audio(script, step_output_dir, step_history)
-                    elif pending_step == "bgm":
-                        run_step_bgm(script, prompts, step_output_dir, step_history)
-                    elif pending_step == "bg_video":
-                        _bg_src = st.session_state.get("_pending_bg_source", "ストック")
-                        use_ai = _bg_src == "AI生成"
-                        use_hybrid = _bg_src == "ハイブリッド"
-                        ai_dur = st.session_state.get("_pending_ai_duration", 8)
-                        ai_clips = st.session_state.get("_pending_ai_max_clips", 10)
-                        spd = st.session_state.get("_pending_speed_factor", 1.0)
-                        nvid = st.session_state.get("_pending_number_of_videos", 1)
-                        _bg_style = st.session_state.get("_pending_bg_style", "自動（台本から推定）")
-                        run_step_bg_video(
-                            script, prompts, step_output_dir, step_history,
-                            use_ai=use_ai, ai_duration=ai_dur, ai_max_clips=ai_clips,
-                            speed_factor=spd, number_of_videos=nvid, hybrid=use_hybrid,
-                            bg_style=_bg_style,
-                        )
-                    elif pending_step == "images":
-                        run_step_images(script, prompts, step_output_dir, step_history)
-                    elif pending_step == "timeline":
-                        materials = load_existing_materials(str(step_output_dir))
-                        st.session_state.audio_files = materials["audio_files"]
-                        run_step_timeline(
-                            script, prompts, mode, output_formats, step_output_dir,
-                            materials["images"], materials["videos"],
-                            Path(materials["bgm"]) if materials["bgm"] else None,
-                            step_history,
-                        )
-                        st.session_state.generation_complete = True
-                except Exception as e:
-                    st.error(f"生成エラー: {e}")
+            # wait_api: APIレート制限回復待ち（WebSocket維持のためkeepaliveパターン）
+            if pending_step == "wait_api":
+                import time as _time_wait
+                next_step = st.session_state.pop("_wait_next", None)
+                placeholder = st.empty()
+                for i in range(30):
+                    remaining = 30 - i
+                    placeholder.info(f"⏳ APIレート制限回復待ち（残り{remaining}秒）")
+                    _time_wait.sleep(1)
+                placeholder.empty()
+                if next_step:
+                    st.session_state._pending_step = next_step
                 st.rerun()
+
+            if is_regen:
+                # 再生成: そのステップの再利用データだけ無効化
+                if pending_step == "audio":
+                    st.session_state.reuse_mode["audio_files"] = {}
+                elif pending_step == "bgm":
+                    st.session_state.reuse_mode["bgm"] = None
+                elif pending_step == "bg_video":
+                    st.session_state.reuse_mode["videos"] = {}
+                elif pending_step == "images":
+                    st.session_state.reuse_mode["images"] = {}
+                elif pending_step == "timeline":
+                    _clear_step_files(step_output_dir, ["timeline.csv"])
+                    _clear_step_files(step_output_dir / "videos", ["*.mp4"], exclude_subdir="backgrounds")
+
+            # 結合済みファイルを削除（個別ファイルは残してスキップ用に使う）
+            if pending_step == "audio":
+                full_wav = step_output_dir / "audio" / "full_audio.wav"
+                if full_wav.exists():
+                    full_wav.unlink(missing_ok=True)
+                st.session_state.audio_files = {}
+
+            _step_success = False
+            try:
+                if pending_step == "audio":
+                    run_step_audio(script, step_output_dir, step_history)
+                elif pending_step == "bgm":
+                    run_step_bgm(script, prompts, step_output_dir, step_history)
+                elif pending_step == "bg_video":
+                    _bg_src = st.session_state.get("_pending_bg_source", "ストック")
+                    use_ai = _bg_src == "AI生成"
+                    use_hybrid = _bg_src == "ハイブリッド"
+                    ai_dur = st.session_state.get("_pending_ai_duration", 8)
+                    ai_clips = st.session_state.get("_pending_ai_max_clips", 10)
+                    spd = st.session_state.get("_pending_speed_factor", 1.0)
+                    nvid = st.session_state.get("_pending_number_of_videos", 1)
+                    _bg_style = st.session_state.get("_pending_bg_style", "自動（台本から推定）")
+                    run_step_bg_video(
+                        script, prompts, step_output_dir, step_history,
+                        use_ai=use_ai, ai_duration=ai_dur, ai_max_clips=ai_clips,
+                        speed_factor=spd, number_of_videos=nvid, hybrid=use_hybrid,
+                        bg_style=_bg_style,
+                    )
+                elif pending_step == "images":
+                    _img_result = run_step_images(script, prompts, step_output_dir, step_history)
+                    if not _img_result.get("success"):
+                        raise RuntimeError("画像生成に失敗しました。詳細はエラーログを確認してください。")
+                elif pending_step == "timeline":
+                    materials = load_existing_materials(str(step_output_dir))
+                    st.session_state.audio_files = materials["audio_files"]
+                    run_step_timeline(
+                        script, prompts, mode, output_formats, step_output_dir,
+                        materials["images"], materials["videos"],
+                        Path(materials["bgm"]) if materials["bgm"] else None,
+                        step_history,
+                    )
+                    st.session_state.generation_complete = True
+                _step_success = True
+            except Exception as e:
+                st.error(f"生成エラー: {e}")
+                # バッチパイプラインをエラー時に停止
+                st.session_state._batch_auto = False
+                st.session_state._batch_pipeline = None
+                # 履歴を中断状態に更新
+                if step_history:
+                    step_history["status"] = "interrupted"
+                    step_history["error"] = str(e)
+                    try:
+                        add_history_entry(step_history)
+                    except Exception:
+                        pass
+
+            # バッチパイプラインの次ステップを自動進行（成功時のみ）
+            if _step_success:
+                _batch_advance_pipeline()
+            st.rerun()
+
+        if step_mode:
+            # ステップモード: 個別ボタンUI
+            st.markdown("各ステップを個別に実行できます。完了後にメモリが解放されます。")
 
             # --- ステップダッシュボード（ボタンはフラグを立てるだけ） ---
 
@@ -2004,19 +2165,38 @@ def main_page() -> None:
                 elif mode == "自動モード（完成動画出力）" and not output_formats:
                     st.error("❌ 出力形式を1つ以上選択してください")
                 else:
-                    use_ai_bg = batch_bg_source == "AI生成"
-                    use_hybrid_bg = batch_bg_source == "ハイブリッド"
-                    run_generation(
-                        script, prompts, mode, output_formats,
-                        generate_audio, generate_images, generate_bgm, generate_bg_video,
-                        use_ai_bg=use_ai_bg,
-                        ai_duration=batch_ai_duration,
-                        ai_max_clips=batch_ai_max_clips,
-                        speed_factor=batch_speed_factor,
-                        number_of_videos=batch_number_of_videos,
-                        hybrid=use_hybrid_bg,
-                        bg_style=batch_bg_style,
-                    )
+                    # パイプラインキューを設定（選択されたステップのみ）
+                    pipeline = []
+                    if generate_audio:
+                        pipeline.append("audio")
+                    if generate_bgm:
+                        pipeline.append("bgm")
+                    if generate_bg_video:
+                        pipeline.append("bg_video")
+                    if generate_images:
+                        pipeline.append("images")
+                    if mode == "自動モード（完成動画出力）":
+                        pipeline.append("timeline")
+
+                    # バッチ設定をセッションステートに保存（bg_videoステップ用）
+                    st.session_state._pending_bg_source = batch_bg_source
+                    st.session_state._pending_ai_duration = batch_ai_duration
+                    st.session_state._pending_ai_max_clips = batch_ai_max_clips
+                    st.session_state._pending_speed_factor = batch_speed_factor
+                    st.session_state._pending_number_of_videos = batch_number_of_videos
+                    st.session_state._pending_bg_style = batch_bg_style
+
+                    st.session_state._batch_pipeline = pipeline
+                    st.session_state._batch_auto = True
+                    st.session_state.output_dir = None
+                    st.session_state.generation_complete = False
+                    st.session_state.current_history_id = None
+                    st.session_state.audio_files = {}
+                    st.session_state.reuse_mode = {"enabled": False, "folder": None, "audio_files": {}, "images": {}, "bgm": None, "videos": {}}
+
+                    # 最初のステップを起動
+                    _batch_advance_pipeline()
+                    st.rerun()
 
     # STEP 5: 結果ダウンロード
     st.header("STEP 5: 結果ダウンロード")
@@ -2138,6 +2318,12 @@ def _render_drive_upload(output_dir: Path) -> None:
     upload_links = st.session_state.get("cloud_upload_links")
     if upload_links:
         st.success(f"アップロード完了！ ({len(upload_links)}ファイル)")
+        # アップロード失敗ファイルを表示
+        failed = st.session_state.get("cloud_upload_failed")
+        if failed:
+            with st.expander(f"⚠️ {len(failed)}ファイルのアップロードに失敗", expanded=True):
+                for f in failed:
+                    st.markdown(f"- `{f['name']}`: {f['error']}")
         for item in upload_links:
             size_str = f" ({item['size_mb']:.0f}MB)" if item["size_mb"] > 1 else ""
             st.markdown(f"- [{item['name']}]({item['url']}){size_str}")
@@ -2168,6 +2354,11 @@ def _render_drive_upload(output_dir: Path) -> None:
             status_placeholder.empty()
 
             st.session_state["cloud_upload_links"] = links
+            # 失敗ファイル情報を保存
+            if uploader.last_failed:
+                st.session_state["cloud_upload_failed"] = uploader.last_failed
+            else:
+                st.session_state.pop("cloud_upload_failed", None)
             st.rerun()
         except Exception as e:
             progress_placeholder.empty()
@@ -2398,6 +2589,12 @@ def _get_or_create_history_entry(output_dir: Path) -> dict:
     if st.session_state.resume_mode["enabled"] and st.session_state.resume_mode["entry"]:
         entry = st.session_state.resume_mode["entry"]
         entry["status"] = "in_progress"
+    elif st.session_state.current_history_id:
+        existing = get_history_entry(st.session_state.current_history_id)
+        if existing and existing.get("output_dir") == str(output_dir):
+            entry = existing
+        else:
+            entry = create_history_entry(str(output_dir))
     else:
         entry = create_history_entry(str(output_dir))
 
@@ -2674,7 +2871,7 @@ def run_step_bg_video(script, prompts, output_dir: Path, history_entry: dict | N
     status = st.empty()
 
     try:
-        # 再利用モード
+        # 再利用モード: 既存の動画をコピー
         if st.session_state.reuse_mode["enabled"] and st.session_state.reuse_mode.get("videos"):
             status.text("♻️ 既存の動画をコピー中...")
             for num, src_path in st.session_state.reuse_mode["videos"].items():
@@ -2687,7 +2884,21 @@ def run_step_bg_video(script, prompts, output_dir: Path, history_entry: dict | N
             if background_videos:
                 st.success(f"♻️ 既存の動画: {len(background_videos)}本をコピーしました")
 
-        if not background_videos:
+        # 全プロンプト番号を収集（不足分の判定に使用）
+        all_prompt_numbers = []
+        if prompts and prompts.prompts:
+            all_prompt_numbers = [p.number for p in prompts.prompts]
+        elif script and script.lines:
+            all_prompt_numbers = [i + 1 for i in range(len(script.lines))]
+
+        # 不足分を判定（再利用モードでも不足セグメントがあれば追加生成）
+        reused_numbers = set(background_videos.keys())
+        missing_numbers = [pn for pn in all_prompt_numbers if pn not in reused_numbers] if all_prompt_numbers else []
+
+        if background_videos and missing_numbers:
+            st.info(f"♻️ 再利用: {len(background_videos)}本読み込み済み、{len(missing_numbers)}セグメント不足 → 追加生成します")
+
+        if not background_videos or missing_numbers:
             if hybrid:
                 # ハイブリッドモード: AI生成 → 未カバーをストック補完
                 ai_videos = _generate_ai_videos(
@@ -2698,15 +2909,8 @@ def run_step_bg_video(script, prompts, output_dir: Path, history_entry: dict | N
                 )
                 background_videos.update(ai_videos)
 
-                # 全プロンプト番号を収集
-                all_prompt_numbers = []
-                if prompts and prompts.prompts:
-                    all_prompt_numbers = [p.number for p in prompts.prompts]
-                elif script and script.lines:
-                    all_prompt_numbers = [i + 1 for i in range(len(script.lines))]
-
-                # AI済みの整数番号を取得
-                ai_covered = {int(k) for k in ai_videos.keys()}
+                # AI済みの整数番号を取得（再利用分も含めてカバー済みを算出）
+                ai_covered = {int(k) for k in background_videos.keys()}
                 uncovered = [pn for pn in all_prompt_numbers if pn not in ai_covered]
 
                 if uncovered:
@@ -2718,33 +2922,43 @@ def run_step_bg_video(script, prompts, output_dir: Path, history_entry: dict | N
                     )
                     background_videos.update(stock_videos)
 
-                # 最終配布（全セグメントカバー）
+                # 最終配布（全セグメントカバー — ファイルコピーで実体化）
                 if background_videos and all_prompt_numbers:
                     generated_numbers = sorted(background_videos.keys())
                     spread = {}
                     for pn in all_prompt_numbers:
-                        closest = min(generated_numbers, key=lambda g: abs(g - pn))
-                        spread[pn] = background_videos[closest]
+                        if pn in background_videos:
+                            spread[pn] = background_videos[pn]
+                        else:
+                            closest = min(generated_numbers, key=lambda g: abs(g - pn))
+                            src_path = Path(background_videos[closest])
+                            dst_path = video_dir / f"{pn:03d}_bg.mp4"
+                            if not dst_path.exists() and src_path.exists():
+                                shutil.copy2(src_path, dst_path)
+                            spread[pn] = str(dst_path)
                     background_videos = spread
 
             elif use_ai:
-                background_videos = _generate_ai_videos(
+                ai_result = _generate_ai_videos(
                     script, prompts, video_dir, output_dir, progress, status,
                     duration_seconds=ai_duration, max_clips=ai_max_clips,
                     speed_factor=speed_factor, number_of_videos=number_of_videos,
                 )
+                background_videos.update(ai_result)
                 # AI生成が0件の場合、ストック素材にフォールバック
-                if not background_videos:
+                if not ai_result:
                     st.warning("⚠️ AI動画生成が0件のため、ストック素材にフォールバックします")
-                    background_videos = _download_stock_videos(
+                    stock_result = _download_stock_videos(
                         script, prompts, video_dir, output_dir, progress, status,
                         bg_style=bg_style,
                     )
+                    background_videos.update(stock_result)
             else:
-                background_videos = _download_stock_videos(
+                stock_result = _download_stock_videos(
                     script, prompts, video_dir, output_dir, progress, status,
                     bg_style=bg_style,
                 )
+                background_videos.update(stock_result)
 
     except Exception as bg_err:
         log_error_to_file(output_dir, "背景動画取得エラー", str(bg_err), traceback.format_exc())
@@ -2884,14 +3098,21 @@ def _generate_ai_videos(script, prompts, video_dir: Path, output_dir: Path, prog
 
         progress.progress((i + 1) / len(scene_items))
 
-    # 生成されたクリップを全プロンプトに配布（各クリップが隣接セグメントもカバー）
+    # 生成されたクリップを全プロンプトに配布（各クリップが隣接セグメントもカバー — ファイルコピーで実体化）
     if not skip_spread and background_videos and all_prompt_numbers:
         generated_numbers = sorted(background_videos.keys())
         spread_videos = {}
         for pn in all_prompt_numbers:
-            # 最も近い生成済みクリップを割り当て
-            closest = min(generated_numbers, key=lambda g: abs(g - pn))
-            spread_videos[pn] = background_videos[closest]
+            if pn in background_videos:
+                spread_videos[pn] = background_videos[pn]
+            else:
+                # 最も近い生成済みクリップを割り当て — ファイルコピー
+                closest = min(generated_numbers, key=lambda g: abs(g - pn))
+                src_path = Path(background_videos[closest])
+                dst_path = video_dir / f"{pn:03d}_bg.mp4"
+                if not dst_path.exists() and src_path.exists():
+                    shutil.copy2(src_path, dst_path)
+                spread_videos[pn] = str(dst_path)
         added_count = len(spread_videos) - len(background_videos)
         if added_count > 0:
             st.info(f"🔄 {len(background_videos)}本のAI動画を{len(spread_videos)}セグメントに配布しました")
@@ -2968,31 +3189,57 @@ def _download_stock_videos(script, prompts, video_dir: Path, output_dir: Path, p
     raw_content = st.session_state.get("prompt_raw_content", "") or st.session_state.get("script_raw_content", "")
     chapters = chapter_pattern.findall(raw_content)
 
-    # 背景動画数: 画像枚数の約半分（最大20本）
+    # target_numbers指定時: 指定された番号すべてを対象にする（間引きしない）
+    # 通常モード: 画像枚数の約半分（最大20本）に間引き → spread処理で全セグメントにコピー
     max_bg_videos = 20
-    if prompts and prompts.prompts:
-        target_count = min(max_bg_videos, max(1, len(prompts.prompts) // 2))
-    else:
-        target_count = max_bg_videos
 
-    if chapters:
-        # チャプター数がtarget_countより少なければ全部、多ければ間引き
-        if len(chapters) <= target_count:
-            search_items = [(i + 1, _to_english_query(ch, i)) for i, ch in enumerate(chapters)]
-        else:
-            ch_step = max(1, len(chapters) // target_count)
-            search_items = [(i + 1, _to_english_query(chapters[i], i)) for i in range(0, len(chapters), ch_step)][:target_count]
-        st.info(f"📑 {len(chapters)}個のチャプターを検出 → {len(search_items)}本の背景動画を取得")
-    elif prompts and prompts.prompts:
-        step = max(1, len(prompts.prompts) // target_count)
-        selected = prompts.prompts[::step][:target_count]
-        search_items = [(p.number, _to_english_query(p.prompt, i)) for i, p in enumerate(selected)]
-    elif script and script.lines:
-        step = max(1, len(script.lines) // target_count)
-        selected = script.lines[::step][:target_count]
-        search_items = [(i + 1, _to_english_query(line.text, i)) for i, line in enumerate(selected)]
+    if target_numbers is not None:
+        # ハイブリッドモード: 指定セグメントごとに専用クエリを生成
+        target_set = set(target_numbers)
+
+        # プロンプト番号→テキストのマッピングを構築
+        prompt_texts: dict[int, str] = {}
+        if chapters:
+            for i, ch in enumerate(chapters):
+                prompt_texts[i + 1] = ch
+        if prompts and prompts.prompts:
+            for p in prompts.prompts:
+                prompt_texts[p.number] = p.prompt
+        elif script and script.lines:
+            for i, line in enumerate(script.lines):
+                prompt_texts[i + 1] = line.text
+
+        search_items = []
+        for idx, tn in enumerate(sorted(target_set)):
+            text = prompt_texts.get(tn, "")
+            query = _to_english_query(text, idx) if text else _fallback_queries[idx % len(_fallback_queries)]
+            search_items.append((tn, query))
+
+        st.info(f"🎥 {len(search_items)}本のストック動画をダウンロードします")
     else:
-        search_items = [(1, "abstract background")]
+        # 通常モード: 間引きしてダウンロード → 後でspread
+        if prompts and prompts.prompts:
+            target_count = min(max_bg_videos, max(1, len(prompts.prompts) // 2))
+        else:
+            target_count = max_bg_videos
+
+        if chapters:
+            if len(chapters) <= target_count:
+                search_items = [(i + 1, _to_english_query(ch, i)) for i, ch in enumerate(chapters)]
+            else:
+                ch_step = max(1, len(chapters) // target_count)
+                search_items = [(i + 1, _to_english_query(chapters[i], i)) for i in range(0, len(chapters), ch_step)][:target_count]
+            st.info(f"📑 {len(chapters)}個のチャプターを検出 → {len(search_items)}本の背景動画を取得")
+        elif prompts and prompts.prompts:
+            step = max(1, len(prompts.prompts) // target_count)
+            selected = prompts.prompts[::step][:target_count]
+            search_items = [(p.number, _to_english_query(p.prompt, i)) for i, p in enumerate(selected)]
+        elif script and script.lines:
+            step = max(1, len(script.lines) // target_count)
+            selected = script.lines[::step][:target_count]
+            search_items = [(i + 1, _to_english_query(line.text, i)) for i, line in enumerate(selected)]
+        else:
+            search_items = [(1, "abstract background")]
 
     # 同じクエリが連続しないようにバリエーションを確保
     seen_queries: dict[str, int] = {}
@@ -3005,16 +3252,6 @@ def _download_stock_videos(script, prompts, video_dir: Path, output_dir: Path, p
         else:
             seen_queries[query] = 0
 
-    # ハイブリッドモード: 指定セグメントのみをダウンロード対象にする
-    if target_numbers is not None:
-        target_set = set(target_numbers)
-        search_items = [(num, q) for num, q in search_items if num in target_set]
-        # target_numbersにあるがsearch_itemsにないセグメントも補完
-        existing_nums = {num for num, _ in search_items}
-        for tn in target_numbers:
-            if tn not in existing_nums:
-                search_items.append((tn, "business office background"))
-
     # 既にダウンロード済みの動画IDを追跡（重複回避）
     used_video_ids: set[str] = set()
 
@@ -3022,23 +3259,18 @@ def _download_stock_videos(script, prompts, video_dir: Path, output_dir: Path, p
         try:
             status.text(f"🎥 背景動画検索中: {i + 1}/{len(search_items)} — {search_query}")
             downloaded = False
-            # per_page を増やして候補を多く取得し、重複を回避
-            videos = stock_client.search_pexels(search_query, per_page=8)
-            for vid in videos:
-                if vid.id in used_video_ids:
-                    continue
-                try:
-                    video_path = video_dir / f"{number:03d}_bg.mp4"
-                    stock_client.download(vid, video_path)
-                    background_videos[number] = str(video_path)
-                    used_video_ids.add(vid.id)
-                    st.success(f"✅ 背景動画 {number} ダウンロード完了")
-                    downloaded = True
+
+            # 検索クエリリスト: メインクエリ → フォールバッククエリ（別キーワードで再試行）
+            queries_to_try = [search_query]
+            fallback_q = _fallback_queries[(i + 7) % len(_fallback_queries)]
+            if fallback_q != search_query:
+                queries_to_try.append(fallback_q)
+
+            for try_query in queries_to_try:
+                if downloaded:
                     break
-                except Exception:
-                    continue
-            if not downloaded:
-                videos = stock_client.search_pixabay(search_query, per_page=8)
+                # per_page を増やして候補を多く取得し、重複を回避
+                videos = stock_client.search_pexels(try_query, per_page=15)
                 for vid in videos:
                     if vid.id in used_video_ids:
                         continue
@@ -3047,20 +3279,35 @@ def _download_stock_videos(script, prompts, video_dir: Path, output_dir: Path, p
                         stock_client.download(vid, video_path)
                         background_videos[number] = str(video_path)
                         used_video_ids.add(vid.id)
-                        st.success(f"✅ 背景動画 {number} ダウンロード完了 (Pixabay)")
+                        st.success(f"✅ 背景動画 {number} ダウンロード完了")
                         downloaded = True
                         break
                     except Exception:
                         continue
+                if not downloaded:
+                    videos = stock_client.search_pixabay(try_query, per_page=15)
+                    for vid in videos:
+                        if vid.id in used_video_ids:
+                            continue
+                        try:
+                            video_path = video_dir / f"{number:03d}_bg.mp4"
+                            stock_client.download(vid, video_path)
+                            background_videos[number] = str(video_path)
+                            used_video_ids.add(vid.id)
+                            st.success(f"✅ 背景動画 {number} ダウンロード完了 (Pixabay)")
+                            downloaded = True
+                            break
+                        except Exception:
+                            continue
             if not downloaded:
-                st.warning(f"⚠️ 背景動画 {number}: 適切なサイズの動画が見つかりません")
+                st.warning(f"⚠️ 背景動画 {number}: 適切なサイズの動画が見つかりません（{search_query}）")
         except Exception as vid_err:
             log_error_to_file(output_dir, f"背景動画取得エラー（{number}）", str(vid_err), traceback.format_exc())
             st.warning(f"⚠️ 背景動画取得エラー（{number}）: {vid_err}")
 
         progress.progress((i + 1) / len(search_items))
 
-    # 生成されたクリップを全プロンプトに配布（ラウンドロビンでバリエーション確保）
+    # 生成されたクリップを全プロンプトに配布（ラウンドロビン + ファイルコピーで実体化）
     if background_videos:
         all_pn = []
         if prompts and prompts.prompts:
@@ -3075,8 +3322,12 @@ def _download_stock_videos(script, prompts, video_dir: Path, output_dir: Path, p
                 if pn in background_videos:
                     spread[pn] = background_videos[pn]
                 else:
-                    # ラウンドロビンで異なる動画を割り当て
-                    spread[pn] = unique_paths[idx % len(unique_paths)]
+                    # ラウンドロビンで異なる動画を割り当て — ファイルをコピーして実体化
+                    src_path = Path(unique_paths[idx % len(unique_paths)])
+                    dst_path = video_dir / f"{pn:03d}_bg.mp4"
+                    if not dst_path.exists() and src_path.exists():
+                        shutil.copy2(src_path, dst_path)
+                    spread[pn] = str(dst_path)
             background_videos = spread
 
     if background_videos:
@@ -3131,7 +3382,7 @@ def run_step_images(script, prompts, output_dir: Path, history_entry: dict | Non
                     generated_images[num] = str(dst_file)
                     copied += 1
                 else:
-                    generated_images[num] = src_path
+                    pass  # ファイルが存在しない - 新規生成にフォールバック
             if copied > 0:
                 reused_count = len(generated_images)
                 st.success(f"♻️ 既存の画像: {copied}枚をコピーしました")
@@ -3183,13 +3434,40 @@ def run_step_images(script, prompts, output_dir: Path, history_entry: dict | Non
                         remaining_min = (len(missing_prompts) - i) * WAIT_BETWEEN_IMAGES / 60
                         status.text(f"🖼️ 画像生成中: {i + 1}/{len(missing_prompts)} - {p.prompt[:30]}...（残り約{remaining_min:.0f}分）")
                         output_path = image_dir / f"{p.number:03d}_scene.png"
-                        image_gen.generate(p.prompt, output_path)
+                        import threading
+                        _gen_error = [None]
+
+                        def _do_generate():
+                            try:
+                                image_gen.generate(p.prompt, output_path)
+                            except Exception as _e:
+                                _gen_error[0] = _e
+
+                        _gen_thread = threading.Thread(target=_do_generate, daemon=True)
+                        _gen_thread.start()
+
+                        _elapsed = 0
+                        while _gen_thread.is_alive():
+                            _gen_thread.join(timeout=1.0)
+                            _elapsed += 1
+                            status.text(
+                                f"🖼️ 画像生成中: {i + 1}/{len(missing_prompts)} "
+                                f"- {p.prompt[:30]}...（API応答待ち {_elapsed}秒）"
+                            )
+
+                        if _gen_error[0] is not None:
+                            raise _gen_error[0]
+
                         generated_images[p.number] = str(output_path)
                         generated_count += 1
 
-                        # レート制限対策: リクエスト間に待機
+                        # レート制限対策: リクエスト間に待機（keepaliveパターン）
                         if i < len(missing_prompts) - 1:
-                            _time.sleep(WAIT_BETWEEN_IMAGES)
+                            wait_secs = int(WAIT_BETWEEN_IMAGES)
+                            for _w in range(wait_secs):
+                                _remaining = wait_secs - _w
+                                status.text(f"⏳ API制限回避のため待機中（残り{_remaining}秒）")
+                                _time.sleep(1)
                     except Exception as img_err:
                         log_error_to_file(output_dir, f"画像生成エラー（画像 {p.number}）", str(img_err), traceback.format_exc())
                         image_errors.append(p.number)
@@ -3205,12 +3483,11 @@ def run_step_images(script, prompts, output_dir: Path, history_entry: dict | Non
 
                     progress.progress((i + 1) / len(missing_prompts))
 
-                    # 3枚毎にチェックポイント + gc.collect
-                    if (i + 1) % 3 == 0:
-                        if history_entry:
-                            history_entry["files"]["images"] = {str(k): v for k, v in generated_images.items()}
-                            add_history_entry(history_entry)
-                        gc.collect()
+                    # 毎回チェックポイント + gc.collect
+                    if history_entry:
+                        history_entry["files"]["images"] = {str(k): v for k, v in generated_images.items()}
+                        add_history_entry(history_entry)
+                    gc.collect()
 
                 if image_errors:
                     st.warning(f"⚠️ {len(image_errors)}枚の画像でAI生成エラー（ストック代替済み）: {image_errors}")
@@ -3413,7 +3690,11 @@ def run_step_timeline(script, prompts, mode: str, output_formats: list, output_d
 
 
 def run_generation(script, prompts, mode: str, output_formats: list, generate_audio: bool = True, generate_images: bool = True, generate_bgm: bool = False, generate_bg_video: bool = False, use_ai_bg: bool = False, ai_duration: int = 8, ai_max_clips: int = 10, speed_factor: float = 1.0, number_of_videos: int = 1, hybrid: bool = False, bg_style: str = "自動（台本から推定）") -> None:
-    """生成処理を実行（全ステップを順番に実行するラッパー）
+    """[DEPRECATED] 生成処理を実行（全ステップを順番に実行するラッパー）
+
+    この関数は非推奨です。バッチモードは _batch_pipeline + _pending_step による
+    ステップチェーン方式に移行しました。長時間ブロックによるWebSocketタイムアウトを
+    回避するため、各ステップを独立したStreamlit実行サイクルで処理します。
 
     Args:
         generate_audio: 音声を生成するかどうか
@@ -3428,6 +3709,14 @@ def run_generation(script, prompts, mode: str, output_formats: list, generate_au
         hybrid: ハイブリッドモード（AI+ストック）を使用するかどうか
         bg_style: 背景動画スタイル
     """
+    import warnings
+    warnings.warn(
+        "run_generation() is deprecated. Use _batch_pipeline + _pending_step step-chain instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    st.warning("⚠️ run_generation() は非推奨です。ステップチェーン方式をご利用ください。")
+
     # デバッグ: 選択されたモードを表示
     materials_info = []
     if generate_audio:
@@ -3892,37 +4181,24 @@ def settings_page() -> None:
         st.success("✅ 設定を保存しました！")
 
 
-def _bulk_download_zip(bucket, file_infos: list[dict], zip_filename: str) -> None:
-    """GCSファイルをサーバーでZIP化してダウンロードボタンを表示する.
-
-    JavaScriptによるクロスオリジンダウンロードの制限を回避するため、
-    サーバーサイドでZIPを生成する方式を採用。
-    """
+def _prepare_bulk_zip(bucket, file_infos: list[dict]) -> bytes:
+    """GCSファイルをサーバーでZIP化してバイト列を返す."""
     import io
     import zipfile
 
-    with st.spinner(f"{len(file_infos)}ファイルをZIP圧縮中..."):
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            for fi in file_infos:
-                blob_name = fi["blob_name"]
-                filename = fi["name"].split("/")[-1]
-                try:
-                    blob = bucket.blob(blob_name)
-                    data = blob.download_as_bytes()
-                    zf.writestr(filename, data)
-                except Exception as e:
-                    logging.getLogger(__name__).warning(f"ZIPスキップ: {blob_name}: {e}")
-        zip_bytes = zip_buffer.getvalue()
-
-    zip_size_mb = len(zip_bytes) / (1024 * 1024)
-    st.download_button(
-        label=f"📥 ZIPをダウンロード（{zip_size_mb:.1f}MB）",
-        data=zip_bytes,
-        file_name=zip_filename,
-        mime="application/zip",
-        key=f"zip_dl_{zip_filename}",
-    )
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fi in file_infos:
+            blob_name = fi["blob_name"]
+            # サブフォルダ構造を維持（例: audio/001.wav）
+            filename = fi["name"]
+            try:
+                blob = bucket.blob(blob_name)
+                data = blob.download_as_bytes()
+                zf.writestr(filename, data)
+            except Exception as e:
+                logging.getLogger(__name__).warning(f"ZIPスキップ: {blob_name}: {e}")
+    return zip_buffer.getvalue()
 
 
 def cloud_files_page() -> None:
@@ -3971,6 +4247,10 @@ def cloud_files_page() -> None:
         if st.session_state.get("_gcs_show_folder") and st.session_state["_gcs_show_folder"] != selected_folder:
             st.session_state.pop("_gcs_show_folder", None)
             st.session_state.pop("_gcs_file_cache", None)
+            # ZIPキャッシュもクリア
+            for key in list(st.session_state.keys()):
+                if key.startswith("_gcs_zip_"):
+                    del st.session_state[key]
 
         if st.session_state.get("_gcs_show_folder"):
             active_folder = st.session_state["_gcs_show_folder"]
@@ -4024,7 +4304,10 @@ def cloud_files_page() -> None:
             dl_col1, dl_col2 = st.columns(2)
             with dl_col1:
                 if st.button("📥 全ファイルを一括ダウンロード", key="bulk_dl_all", type="primary"):
-                    _bulk_download_zip(bucket, all_files, f"{active_folder}_all.zip")
+                    with st.spinner(f"{len(all_files)}ファイルをZIP圧縮中..."):
+                        st.session_state["_gcs_zip_data_all"] = _prepare_bulk_zip(bucket, all_files)
+                        st.session_state["_gcs_zip_name_all"] = f"{active_folder}_all.zip"
+                    st.rerun()
             with dl_col2:
                 all_urls = "\n".join(f["url"] for f in all_files)
                 st.download_button(
@@ -4034,6 +4317,26 @@ def cloud_files_page() -> None:
                     mime="text/plain",
                     key="copy_all_urls",
                 )
+
+            # 全ファイルZIPダウンロードボタン（準備完了時に表示）
+            if st.session_state.get("_gcs_zip_data_all"):
+                zip_bytes = st.session_state["_gcs_zip_data_all"]
+                zip_name = st.session_state.get("_gcs_zip_name_all", "all.zip")
+                zip_size_mb = len(zip_bytes) / (1024 * 1024)
+                dl_ready_col1, dl_ready_col2 = st.columns([3, 1])
+                with dl_ready_col1:
+                    st.download_button(
+                        label=f"📥 ZIPをダウンロード（{zip_size_mb:.1f}MB）",
+                        data=zip_bytes,
+                        file_name=zip_name,
+                        mime="application/zip",
+                        key="zip_dl_all_ready",
+                    )
+                with dl_ready_col2:
+                    if st.button("🗑️ ZIPを破棄", key="clear_zip_all"):
+                        st.session_state.pop("_gcs_zip_data_all", None)
+                        st.session_state.pop("_gcs_zip_name_all", None)
+                        st.rerun()
 
             st.divider()
 
@@ -4047,8 +4350,33 @@ def cloud_files_page() -> None:
                 folder_size = sum(i["size_mb"] for i in items)
                 with st.expander(f"{label}（{len(items)}ファイル / {folder_size:.0f}MB）"):
                     # カテゴリ別一括ダウンロード
+                    cat_zip_key = f"_gcs_zip_data_{gcs_folder}"
+                    cat_zip_name_key = f"_gcs_zip_name_{gcs_folder}"
                     if st.button(f"📥 {label}を一括ダウンロード", key=f"bulk_dl_{gcs_folder}"):
-                        _bulk_download_zip(bucket, items, f"{active_folder}_{gcs_folder}.zip")
+                        with st.spinner(f"{len(items)}ファイルをZIP圧縮中..."):
+                            st.session_state[cat_zip_key] = _prepare_bulk_zip(bucket, items)
+                            st.session_state[cat_zip_name_key] = f"{active_folder}_{gcs_folder}.zip"
+                        st.rerun()
+
+                    # カテゴリZIPダウンロードボタン（準備完了時に表示）
+                    if st.session_state.get(cat_zip_key):
+                        cat_zip_bytes = st.session_state[cat_zip_key]
+                        cat_zip_name = st.session_state.get(cat_zip_name_key, f"{gcs_folder}.zip")
+                        cat_zip_size_mb = len(cat_zip_bytes) / (1024 * 1024)
+                        cat_dl_col1, cat_dl_col2 = st.columns([3, 1])
+                        with cat_dl_col1:
+                            st.download_button(
+                                label=f"📥 ZIPをダウンロード（{cat_zip_size_mb:.1f}MB）",
+                                data=cat_zip_bytes,
+                                file_name=cat_zip_name,
+                                mime="application/zip",
+                                key=f"zip_dl_{gcs_folder}_ready",
+                            )
+                        with cat_dl_col2:
+                            if st.button("🗑️ 破棄", key=f"clear_zip_{gcs_folder}"):
+                                st.session_state.pop(cat_zip_key, None)
+                                st.session_state.pop(cat_zip_name_key, None)
+                                st.rerun()
 
                     for item in items:
                         filename = item["name"].split("/")[-1]

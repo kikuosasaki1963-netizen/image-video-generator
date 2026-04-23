@@ -217,6 +217,82 @@ speaker2:（悲しそうに）本当ですか？
         assert script.total_lines == 2
         assert "こんにちは" in script.lines[0].text
 
+    def test_multiline_dialogue_after_inline_speaker(self) -> None:
+        """speaker: テキスト 形式でも、後続の段落が次の話者まで統合される"""
+        content = """speaker1: こんにちは、今日は不動産投資について解説します。
+これは最初の段落です。
+もう一つの段落。
+さらに続きます。
+speaker2: よろしくお願いします。
+"""
+        parser = ScriptParser()
+        script = parser.parse_text(content)
+
+        assert script.total_lines == 2
+        # speaker1 の全段落が結合されている
+        assert "こんにちは" in script.lines[0].text
+        assert "これは最初の段落です。" in script.lines[0].text
+        assert "もう一つの段落。" in script.lines[0].text
+        assert "さらに続きます。" in script.lines[0].text
+        assert script.lines[0].speaker == "speaker1"
+        # speaker2 のセリフは独立している
+        assert script.lines[1].text == "よろしくお願いします。"
+        assert script.lines[1].speaker == "speaker2"
+
+    def test_multiline_dialogue_with_blank_lines(self) -> None:
+        """空行を挟んだ複数段落も次の話者まで統合される"""
+        content = """speaker1: 最初の段落です。
+
+中間の段落です。
+
+最後の段落です。
+
+speaker2: 返事です。
+"""
+        parser = ScriptParser()
+        script = parser.parse_text(content)
+
+        assert script.total_lines == 2
+        assert "最初の段落です。" in script.lines[0].text
+        assert "中間の段落です。" in script.lines[0].text
+        assert "最後の段落です。" in script.lines[0].text
+        assert script.lines[1].text == "返事です。"
+
+    def test_multiline_char_name_dialogue(self) -> None:
+        """キャラ名：テキスト 形式でも複数段落が統合される"""
+        content = """ミオン：こんにちは、今日は解説します。
+これは最初の段落です。
+もう一つの段落。
+
+アリイエ：よろしくお願いします。
+"""
+        parser = ScriptParser()
+        script = parser.parse_text(content)
+
+        assert script.total_lines == 2
+        assert "こんにちは" in script.lines[0].text
+        assert "これは最初の段落です。" in script.lines[0].text
+        assert "もう一つの段落。" in script.lines[0].text
+        assert script.lines[1].text == "よろしくお願いします。"
+
+    def test_multiline_preserves_reading_hints_and_scene(self) -> None:
+        """複数段落統合後も読み仮名と情景補足が正しく処理される"""
+        content = """speaker1:（驚いて）{DSCR|ディーエスシーアール}について説明します。
+これは追加の段落です。
+speaker2: わかりました。
+"""
+        parser = ScriptParser()
+        script = parser.parse_text(content)
+
+        assert script.total_lines == 2
+        # 情景補足が抽出・除去されている
+        assert script.lines[0].scene_description == "驚いて"
+        assert "(驚いて)" not in script.lines[0].text
+        # 読み仮名が展開されている
+        assert "ディーエスシーアール" in script.lines[0].text
+        # 後続の段落が統合されている
+        assert "これは追加の段落です。" in script.lines[0].text
+
 
 class TestImagePromptParser:
     """ImageGenerator のプロンプトパースのテスト"""
